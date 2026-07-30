@@ -27,8 +27,10 @@ As a further optimization, energy change rates can be recalculated over differen
 energies with the highest change rates, and less frequently for energies with lower rates.
 
 In addition to the Euler method, the more accurate Heun method is also implemented to improve numerical precision.
-In this method, the energy change rate is calculated at the beginning of each step, then recalculated at the end
-of the step and used to correct the final result.
+In this method, the energy change and injection rates are calculated at the beginning of each step, then
+recalculated at the predicted end-of-step state and averaged to correct the final result; the injected
+particles are counted using the bin widths of the corresponding times, so both the energies and the
+particle counts are second-order accurate.
 
 TimeEvolution class
 ---------------------------
@@ -71,6 +73,7 @@ and :class:`~agnpy.time_evolution.types.InjectionAbsFn`
 * `max_density_change_per_interval` - float
 * `max_injection_per_interval` - float
 * `optimize_recalculating_slow_rates` - bool
+* `max_radius_change_for_cached_rates` - float
 
 These parameters define how the total evolution time is divided into smaller steps. The `step_duration` parameter
 may be set to a specific time, in which case the total evaluation time is split into equal steps of that duration.
@@ -171,8 +174,8 @@ consequences of the expansion are then modelled consistently:
   which conserves the total number of particles :math:`N = n V_b`. This is registered internally as an additional
   relative injection (escape) function under the reserved key ``"expansion_dilution"``;
 * **magnetic field decay**: the field follows :math:`B(t) = B_0 (R_0 / R(t))^m`, where the index `m` is set by
-  the `magnetic_field_index` parameter of `BlobExpansion`. Use `m=1` for conservation of the toroidal field flux
-  (the default), `m=2` for the poloidal one, or `m=0` to keep the field constant.
+  the `magnetic_field_index` parameter of `BlobExpansion`. The value m=1 corresponds to the case when the total energy
+  of magnetic field through the cross section of the blob is constant.
 
 Because the internal functions are registered alongside the user-provided ones, the automatic step-duration
 constraints (`max_energy_change_per_interval` etc.) also bound the radius growth per step, and the expansion rates
@@ -182,10 +185,9 @@ As a side effect (in addition to replacing `blob.n_e`), the `evaluate` method ad
 along with the elapsed time. Since other processes, such as synchrotron or SSC losses, read the blob properties
 at every step, they automatically respond to the growing radius and the decaying magnetic field. A subsequent
 `evaluate` call continues the expansion from the radius already reached, so a simulation can be split into
-multiple runs. The `expansion` parameter is not supported together with `optimize_recalculating_slow_rates`,
-because with an expanding blob all rates depend on the radius and the magnetic field, which change at every step.
+multiple runs.
 
-.. plot:: snippets/time_evolution_2.py
+.. plot:: snippets/time_evolution_expanding.py
    :include-source:
 
 Energy change functions

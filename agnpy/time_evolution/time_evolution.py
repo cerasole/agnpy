@@ -88,7 +88,13 @@ class TimeEvolution:
     optimize_recalculating_slow_rates :
         If True, the automatically selected time interval duration may differ per energy bins - longer intervals
         will be used for bins where energy change is slower, and the rate of change will not be recalculated until the
-        end of such interval
+        end of such interval. Note that with this optimization, the rates reported in the results and callbacks
+        may be up to one caching interval old for the slowly-changing bins.
+    max_radius_change_for_cached_rates :
+        Only relevant when both `expansion` and `optimize_recalculating_slow_rates` are active: the maximum relative
+        change of the blob radius allowed while the rates of slowly-changing bins stay cached. In most cases it is not needed,
+        because the adiabatic term already limits the caching intervals; but it keeps the cached rates fresh
+        when that threshold is relaxed.
     method :
         Numerical method for calculating energy evolution; accepted values: "euler" (faster) or "heun" (more precise)
     subgroups :
@@ -111,8 +117,6 @@ class TimeEvolution:
         (registered as an internal relative injection function "expansion_dilution", dn/dt = -3 * n * v_exp / R),
         and the decay of the magnetic field B = B_0 * (R_0 / R)^magnetic_field_index.
         The blob.R_b and blob.B are advanced after every time step (a side effect on the blob, like blob.n_e).
-        Not supported together with optimize_recalculating_slow_rates, because with an expanding blob
-        all rates depend on R and B, which change every step.
     """
 
     def __init__(self,
@@ -130,6 +134,7 @@ class TimeEvolution:
                  max_density_change_per_interval: float = 0.1,
                  max_injection_per_interval: float = 1.0,
                  optimize_recalculating_slow_rates: bool = None,
+                 max_radius_change_for_cached_rates: float = 0.01,
                  method: NumericalMethod = "euler",
                  subgroups: SubgroupsList = None,
                  subgroups_initial_density: NDArray[np.floating] =None,
@@ -177,10 +182,19 @@ class TimeEvolution:
                 lambda args: -to_erg(args.gamma) * expansion.v_exp / self._blob.R_b
             self._rel_injection_functions[EXPANSION_DILUTION_KEY] = \
                 lambda args: -3 * expansion.v_exp / self._blob.R_b * np.ones(args.gamma.shape)
+            # the internal expansion rates are cheap and depend on the changing radius,
+            # so they are always recalculated, even when other rates are cached
+            self._cached_energy_change_functions = {
+                k: f for k, f in self._energy_change_functions.items() if k != ADIABATIC_EXPANSION_KEY}
+            self._cached_rel_injection_functions = {
+                k: f for k, f in self._rel_injection_functions.items() if k != EXPANSION_DILUTION_KEY}
             if subgroups is not None:
                 # expansion affects the particles of every subgroup
                 subgroups = [list(subgroup) + [ADIABATIC_EXPANSION_KEY, EXPANSION_DILUTION_KEY]
                              for subgroup in subgroups]
+        else:
+            self._cached_energy_change_functions = self._energy_change_functions
+            self._cached_rel_injection_functions = self._rel_injection_functions
         self._gamma_bounds = gamma_bounds
         if gamma_bounds is not None and initial_gamma_array is not None:
             if np.any(initial_gamma_array < gamma_bounds[0]):
@@ -202,14 +216,14 @@ class TimeEvolution:
         self._max_injection_per_interval = max_injection_per_interval * u.Unit("cm-3")
         if optimize_recalculating_slow_rates and step_duration != 'auto':
             raise ValueError("optimize_recalculating_slow_rates is only supported with automatic step duration")
-        if optimize_recalculating_slow_rates and expansion is not None:
-            raise ValueError("optimize_recalculating_slow_rates is not supported when expansion is set, "
-                             "because all rates depend on the changing blob radius and magnetic field")
+        if not (max_radius_change_for_cached_rates > 0):
+            raise ValueError("max_radius_change_for_cached_rates must be a positive number")
+        self._max_radius_change_for_cached_rates = max_radius_change_for_cached_rates
         valid_methods = {"heun", "euler"}
         if method.lower() not in valid_methods:
             raise ValueError(f"Invalid method '{method}'. Expected one of: {', '.join(valid_methods)}")
         if optimize_recalculating_slow_rates is None:
-            optimize_recalculating_slow_rates = step_duration == 'auto' and method.lower() == "euler" and expansion is None
+            optimize_recalculating_slow_rates = step_duration == 'auto' and method.lower() == "euler"
         self._optimize_recalculating_slow_rates = optimize_recalculating_slow_rates
         if optimize_recalculating_slow_rates and method.lower() == 'heun':
             raise ValueError("Heun method is not supported when optimize_recalculating_slow_rates is set")
@@ -283,6 +297,11 @@ class TimeEvolution:
                 max_times = self._calc_max_time_per_bin(
                     en_bins, density, subgroups_density, en_chg_rates_grouped, rel_injection_rates_grouped, abs_injection_rates_grouped)
                 if self._optimize_recalculating_slow_rates:
+                    if self._expansion is not None and self._expansion.v_exp > 0:
+                        # don't let the cached rates outlive a significant radius change
+                        radius_cap = (self._max_radius_change_for_cached_rates
+                                      * self._blob.R_b / self._expansion.v_exp).to(u.s)
+                        max_times = np.minimum(max_times, radius_cap)
                     bins_with_no_time_left = time_left_per_bin == 0
                     time_left_per_bin[bins_with_no_time_left] = max_times[bins_with_no_time_left]
                     step_time = np.min(time_left_per_bin)
@@ -305,12 +324,24 @@ class TimeEvolution:
             else:
                 recalc_mask = np.ones_like(density, dtype=bool)
             update_bin_ub(gm_bins, recalc_mask)
-            en_chg_rates = recalc_new_rates(gm_bins, self._energy_change_functions, density, subgroups_density,
+            # with rate caching, the internal expansion functions are excluded from the cached dicts and
+            # recalculated separately below for all bins - they are cheap and depend on the changing radius
+            split_expansion_rates = self._optimize_recalculating_slow_rates and self._expansion is not None
+            en_fns = self._cached_energy_change_functions if split_expansion_rates else self._energy_change_functions
+            rel_fns = self._cached_rel_injection_functions if split_expansion_rates else self._rel_injection_functions
+            en_chg_rates = recalc_new_rates(gm_bins, en_fns, density, subgroups_density,
                                             remap(mapping,en_chg_rates,np.nan), recalc_mask)
             abs_injection_rates = recalc_new_rates(gm_bins[0], self._abs_injection_functions, density, subgroups_density,
                                                    remap(mapping, abs_injection_rates, np.nan), recalc_mask)
-            rel_injection_rates = recalc_new_rates(gm_bins[0], self._rel_injection_functions, density, subgroups_density,
+            rel_injection_rates = recalc_new_rates(gm_bins[0], rel_fns, density, subgroups_density,
                                                    remap(mapping, rel_injection_rates, np.nan), recalc_mask)
+            if split_expansion_rates:
+                en_chg_rates.update(recalc_new_rates(
+                    gm_bins, {ADIABATIC_EXPANSION_KEY: self._energy_change_functions[ADIABATIC_EXPANSION_KEY]},
+                    density, subgroups_density))
+                rel_injection_rates.update(recalc_new_rates(
+                    gm_bins[0], {EXPANSION_DILUTION_KEY: self._rel_injection_functions[EXPANSION_DILUTION_KEY]},
+                    density, subgroups_density))
             total_time_elapsed += step_time
             if self._distribution_change_callback is not None:
                 self._distribution_change_callback(TimeEvaluationResult(total_time_elapsed,
@@ -385,22 +416,35 @@ class TimeEvolution:
         # ======== stage 2: for Heun method, recalculate bins ========
         if self._method.lower() == "heun":
             # the corrector rates are evaluated at the predicted end-of-step blob state (exact, R is linear in time);
-            # the real advance is done once in evaluate(). Injection rates (incl. dilution) stay first-order,
-            # matching the reuse of total_injection_grouped below.
+            # the real advance is done once in evaluate()
             if self._expansion is not None:
                 r_saved, b_saved = self._blob.R_b, self._blob.B
                 self._advance_expansion(unit_time_interval_sec)
             try:
                 en_chg_rates_recalced = recalc_new_rates(new_gm_bins, self._energy_change_functions, new_dens, subgroups_density)
+                rel_injection_recalced = recalc_new_rates(new_gm_bins[0], self._rel_injection_functions, new_dens, subgroups_density)
+                abs_injection_recalced = recalc_new_rates(new_gm_bins[0], self._abs_injection_functions, new_dens, subgroups_density)
             finally:
                 if self._expansion is not None:
                     self._blob.R_b, self._blob.B = r_saved, b_saved
             en_changes_grouped_recalced = sum_change_rates(en_chg_rates_recalced, new_gm_bins.shape, erg_per_s, self._subgroups)
             averaged_en_chg_rates_grouped = (en_changes_grouped + en_changes_grouped_recalced) / 2
+            rel_injection_grouped_recalced = sum_change_rates(rel_injection_recalced, new_gm_bins.shape[-1:], per_s, self._subgroups)
+            abs_injection_grouped_recalced = sum_change_rates(abs_injection_recalced, new_gm_bins.shape[-1:], per_s_cm3, self._subgroups)
+            total_injection_grouped_recalced = (to_densities_grouped(new_dens, subgroups_density) * rel_injection_grouped_recalced
+                                                + abs_injection_grouped_recalced)
             abs_en_chg_recalc = averaged_en_chg_rates_grouped * unit_time_interval_sec
+            # deposit the injected particle count using the bin widths of the epoch each rate refers to,
+            # then convert it back to a density over the corrector's final bin widths;
+            # this keeps the particle count second-order accurate
+            width_start = en_bins[1] - en_bins[0]
+            width_predicted = to_erg(new_gm_bins[1] - new_gm_bins[0])
+            width_corrected = width_start + abs_en_chg_recalc[:, 1] - abs_en_chg_recalc[:, 0]
+            averaged_injection_grouped = (total_injection_grouped * width_start
+                                          + total_injection_grouped_recalced * width_predicted) / 2 / width_corrected
             new_gm_bins, new_dens, subgroups_density = (
                 self._apply_time_eval(en_bins, density, subgroups_density, abs_en_chg_recalc,
-                                total_injection_grouped * unit_time_interval_sec))
+                                averaged_injection_grouped * unit_time_interval_sec))
             dist = update_distribution(new_gm_bins, new_dens, self._blob)
             en_changes_grouped = averaged_en_chg_rates_grouped
 

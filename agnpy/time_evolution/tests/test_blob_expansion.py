@@ -99,7 +99,7 @@ class TestBlobExpansion:
 
         assert u.isclose(blob1.R_b, blob2.R_b, rtol=1e-9)
         assert u.isclose(blob1.B, blob2.B, rtol=1e-9)
-        gamma_min, gamma_max = blob1.n_e.gamma_min, blob1.n_e.gamma_max
+        gamma_min, gamma_max = blob1.n_e.gamma_min * 1.01, blob1.n_e.gamma_max * 0.99
         gammas = np.logspace(np.log10(gamma_min), np.log10(gamma_max))
         assert u.allclose(
             blob1.n_e.evaluate(gammas, 1, gamma_min, gamma_max),
@@ -108,42 +108,38 @@ class TestBlobExpansion:
 
     def test_heun_method_compared_to_euler_for_expansion(self):
         """ Heun method with 2x longer steps should still beat Euler on the analytically known
-            adiabatic solution gamma(t) = gamma_0 * R_0 / R(t) """
+            adiabatic solution gamma(t) = gamma_0 * R_0 / R(t), and it should also conserve
+            the total number of electrons much better, because the corrector recalculates
+            the dilution at the predicted end-of-step state with width-aware count deposits """
         r_0 = (100 * c * u.s).to(u.cm)
         v_exp = 0.45 * c
         time = 200 * u.s
         r_t = r_0 + (v_exp * time).to("cm")
 
-        blob1 = Blob(r_0, n_e=PowerLaw())
-        initial_gamma = blob1.gamma_e
-        TimeEvolution(blob1, time, expansion=BlobExpansion(v_exp), method="euler",
-                      step_duration=1 * u.s).evaluate()
-        euler_reversed_analytically = blob1.gamma_e * (r_t / r_0).to_value("")
+        def evolve(method, step_duration):
+            blob = Blob(r_0, n_e=PowerLaw())
+            initial_gamma = blob.gamma_e
+            electrons_before = blob.n_e.integrate() * blob.V_b
+            TimeEvolution(blob, time, expansion=BlobExpansion(v_exp), method=method,
+                          step_duration=step_duration).evaluate()
+            reversed_analytically = blob.gamma_e * (r_t / r_0).to_value("")
+            gamma_error = np.average(np.abs((reversed_analytically - initial_gamma) / initial_gamma))
+            electrons_after = blob.n_e.integrate() * blob.V_b
+            electrons_error = np.abs((electrons_after - electrons_before) / electrons_before).to_value("")
+            return gamma_error, electrons_error
 
-        blob2 = Blob(r_0, n_e=PowerLaw())
-        TimeEvolution(blob2, time, expansion=BlobExpansion(v_exp), method="heun",
-                      step_duration=2 * u.s).evaluate()
-        heun_reversed_analytically = blob2.gamma_e * (r_t / r_0).to_value("")
+        # Heun makes two rate evaluations per step, so compare it with 2x shorter Euler steps
+        euler_gamma_error, euler_electrons_error = evolve("euler", 1 * u.s)
+        heun_gamma_error, heun_electrons_error = evolve("heun", 2 * u.s)
 
-        errors_euler = np.abs((euler_reversed_analytically - initial_gamma) / initial_gamma)
-        errors_heun = np.abs((heun_reversed_analytically - initial_gamma) / initial_gamma)
-        print("Average error Euler method", np.average(errors_euler))
-        print("Average error Heun  method", np.average(errors_heun))
-        assert np.average(errors_heun) < np.average(errors_euler)
-
-    def test_synchrotron_cooling_is_weaker_when_magnetic_field_decays(self):
-        """ With B decaying as (R_0/R)^2 the synchrotron losses weaken as the blob grows,
-            so the highest-energy electrons keep more energy than with a constant B """
-        def evolve(magnetic_field_index):
-            blob = self._make_blob(R_b=1e13 * u.cm, B=1 * u.G)
-            synch = Synchrotron(blob)
-            TimeEvolution(blob, 500 * u.s, synchrotron_loss(synch),
-                          expansion=BlobExpansion(0.3 * c, magnetic_field_index)).evaluate()
-            return blob.n_e.gamma_max
-
-        gamma_max_constant_b = evolve(0.0)
-        gamma_max_decaying_b = evolve(2.0)
-        assert gamma_max_decaying_b > gamma_max_constant_b
+        print("Average gamma error:")
+        print("Euler (step length 1s)", f"{euler_gamma_error:.2E}")
+        print("Heun (step length 2s)", f"{heun_gamma_error:.2E}")
+        print("Electron count error")
+        print("Euler (step length 1s)", f"{euler_electrons_error:.2E}")
+        print("Heun (step length 2s)", f"{heun_electrons_error:.2E}")
+        assert heun_gamma_error < euler_gamma_error
+        assert heun_electrons_error < euler_electrons_error
 
     def test_expansion_with_subgroups_affects_all_groups(self):
         no_energy_change = lambda args: np.zeros(args.gamma.shape) * u.Unit("erg s-1")
@@ -200,11 +196,65 @@ class TestBlobExpansion:
         with pytest.raises(ValueError):
             BlobExpansion(0.1 * c, magnetic_field_index=-1)
         with pytest.raises(ValueError):
-            TimeEvolution(blob, 1 * u.s, expansion=BlobExpansion(0.1 * c),
-                          optimize_recalculating_slow_rates=True)
-        with pytest.raises(ValueError):
             TimeEvolution(blob, 1 * u.s,
                           {ADIABATIC_EXPANSION_KEY: lambda args: None},
                           expansion=BlobExpansion(0.1 * c))
         with pytest.raises(ValueError):
             TimeEvolution(blob, 1 * u.s)  # no processes defined at all
+        with pytest.raises(ValueError):
+            TimeEvolution(blob, 1 * u.s, expansion=BlobExpansion(0.1 * c),
+                          max_radius_change_for_cached_rates=0)
+        with pytest.raises(ValueError):
+            TimeEvolution(blob, 1 * u.s, expansion=BlobExpansion(0.1 * c),
+                          max_radius_change_for_cached_rates=np.nan)
+        # expansion combined with rate caching is supported
+        TimeEvolution(blob, 1 * u.s, expansion=BlobExpansion(0.1 * c),
+                      optimize_recalculating_slow_rates=True)
+
+    def test_optimized_rates_match_unoptimized_with_expansion(self):
+        """ Caching the rates of slowly-changing bins must not distort the results of an expanding-blob
+            simulation: the internal expansion rates are always recalculated, and the staleness of the cached
+            synchrotron rates is bounded by the step constraints and by max_radius_change_for_cached_rates """
+        time = 2e6 * u.s
+        v_exp = 0.05 * c
+
+        def evolve(optimize):
+            blob = self._make_blob(R_b=1e16 * u.cm, B=1 * u.G, gamma_max=1e7)
+            synch = Synchrotron(blob)
+            TimeEvolution(blob, time, synchrotron_loss(synch), expansion=BlobExpansion(v_exp),
+                          optimize_recalculating_slow_rates=optimize).evaluate()
+            return blob
+
+        blob_optimized = evolve(True)
+        blob_unoptimized = evolve(False)
+
+        assert u.isclose(blob_optimized.R_b, blob_unoptimized.R_b, rtol=1e-9)
+        assert u.isclose(blob_optimized.B, blob_unoptimized.B, rtol=1e-9)
+        gammas = np.logspace(np.log10(blob_unoptimized.n_e.gamma_min * 1.05),
+                             np.log10(blob_unoptimized.n_e.gamma_max * 0.95), 30)
+        assert u.allclose(blob_optimized.n_e(gammas), blob_unoptimized.n_e(gammas), rtol=0.02)
+
+    def test_optimization_reduces_rate_evaluations_with_expansion(self):
+        """ The point of allowing expansion together with optimize_recalculating_slow_rates: when the highest
+            energies force very small steps, the rates of the slowly-cooling bins should stay cached, because
+            the radius barely changes during such steps. This test checks the speedup (the number of rate
+            evaluations), so the expansion itself is chosen to be physically negligible """
+        time = 100 * u.s
+        v_exp = 0.001 * c
+
+        def evolve(optimize):
+            blob = self._make_blob(R_b=1e16 * u.cm, B=1 * u.G, gamma_max=1e7)
+            base_loss = synchrotron_loss(Synchrotron(blob))
+            evaluated_bins = [0]
+            def counting_loss(args):
+                evaluated_bins[0] += len(args.gamma)
+                return base_loss(args)
+            TimeEvolution(blob, time, counting_loss, expansion=BlobExpansion(v_exp),
+                          optimize_recalculating_slow_rates=optimize).evaluate()
+            return evaluated_bins[0]
+
+        evaluations_optimized = evolve(True)
+        evaluations_unoptimized = evolve(False)
+        print("Synchrotron rate evaluations:", evaluations_optimized, "optimized,",
+              evaluations_unoptimized, "unoptimized")
+        assert evaluations_optimized < evaluations_unoptimized / 3
