@@ -34,6 +34,12 @@ def nu_to_epsilon_prime(nu, z=0, delta_D=1, m = m_e):
     epsilon = nu.to("", equivalencies=epsilon_eq)
     return (1 + z) * epsilon / delta_D
 
+def lab_time_to_blob_time(t_lab: u.Quantity, z=0, delta_D=1) -> u.Quantity:
+    """
+    Convert observer (lab)-frame time to blob-frame time
+    """
+    return t_lab * delta_D / (1.0 + z)
+
 
 def B_to_cgs(B):
     """convert a magnetic field to CGS units"""
