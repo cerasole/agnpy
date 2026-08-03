@@ -27,8 +27,10 @@ As a further optimization, energy change rates can be recalculated over differen
 energies with the highest change rates, and less frequently for energies with lower rates.
 
 In addition to the Euler method, the more accurate Heun method is also implemented to improve numerical precision.
-In this method, the energy change rate is calculated at the beginning of each step, then recalculated at the end
-of the step and used to correct the final result.
+In this method, the energy change and injection rates are calculated at the beginning of each step, then
+recalculated at the predicted end-of-step state and averaged to correct the final result; the injected
+particles are counted using the bin widths of the corresponding times, so both the energies and the
+particle counts are second-order accurate.
 
 TimeEvolution class
 ---------------------------
@@ -71,6 +73,7 @@ and :class:`~agnpy.time_evolution.types.InjectionAbsFn`
 * `max_density_change_per_interval` - float
 * `max_injection_per_interval` - float
 * `optimize_recalculating_slow_rates` - bool
+* `max_radius_change_for_cached_rates` - float
 
 These parameters define how the total evolution time is divided into smaller steps. The `step_duration` parameter
 may be set to a specific time, in which case the total evaluation time is split into equal steps of that duration.
@@ -145,10 +148,47 @@ indicate particle loss).
 
 * `method`
 * `distribution_change_callback`
+* `expansion`
 
 The `method` parameter allows switching from the default Euler method to the more accurate, but slower, Heun
 method. The `distribution_change_callback` parameter accepts a user-defined function that is called after each
 time step and can be used to track the progress of the calculation.
+The `expansion` parameter enables modelling of an expanding blob - see the dedicated section below.
+
+Blob expansion
+-----------------------------
+
+By default, the blob is treated as a region of fixed size. Passing the optional `expansion` parameter - an instance
+of :class:`~agnpy.time_evolution.types.BlobExpansion` - makes the blob radius grow at a constant rate:
+
+.. math::
+
+  R(t) = R_0 + v_{exp} \, t
+
+where the expansion speed :math:`v_{exp}` must be non-negative and lower than the speed of light. Three physical
+consequences of the expansion are then modelled consistently:
+
+* **adiabatic energy losses**: every electron loses energy at the rate :math:`dE/dt = -E \, v_{exp} / R`.
+  This is registered internally as an additional energy change function under the reserved key ``"adiabatic_expansion"``;
+* **density dilution**: the particle density decreases as the volume grows, :math:`dn/dt = -3 \, n \, v_{exp} / R`,
+  which conserves the total number of particles :math:`N = n V_b`. This is registered internally as an additional
+  relative injection (escape) function under the reserved key ``"expansion_dilution"``;
+* **magnetic field decay**: the field follows :math:`B(t) = B_0 (R_0 / R(t))^m`, where the index `m` is set by
+  the `magnetic_field_index` parameter of `BlobExpansion`. The value m=1 corresponds to the case when the total energy
+  of magnetic field through the cross section of the blob is constant.
+
+Because the internal functions are registered alongside the user-provided ones, the automatic step-duration
+constraints (`max_energy_change_per_interval` etc.) also bound the radius growth per step, and the expansion rates
+are reported in the evaluation results under their reserved keys (which must not be used as names of user functions).
+
+As a side effect (in addition to replacing `blob.n_e`), the `evaluate` method advances `blob.R_b` and `blob.B`
+along with the elapsed time. Since other processes, such as synchrotron or SSC losses, read the blob properties
+at every step, they automatically respond to the growing radius and the decaying magnetic field. A subsequent
+`evaluate` call continues the expansion from the radius already reached, so a simulation can be split into
+multiple runs.
+
+.. plot:: snippets/time_evolution_expanding.py
+   :include-source:
 
 Energy change functions
 -----------------------------
