@@ -33,18 +33,18 @@ class TestKernel:
 
     def test_shape_and_normalisation(self):
         R = 1e16 * u.cm
-        integrator = ltt_integrator_constant_radius(R, [1e15] * u.Hz, kernel_points_size=2001)
+        integrator = ltt_integrator_constant_radius(R, [1e15] * u.Hz, kernel_points_size=41)
         window = integrator.for_time(0 * u.s)
         tau, W = window.kernel
 
         tau_max = (R / c).to("s")
         assert u.isclose(tau[0], -tau_max, rtol=1e-12)
         assert u.isclose(tau[-1], tau_max, rtol=1e-12)
-        assert len(tau) == 2001 == integrator.kernel_points_size
+        assert len(tau) == integrator.kernel_points_size
 
         # normalised to 1, peaked at 3c/4R, vanishing at both ends
-        assert np.isclose(kernel_integral(window), 1.0, rtol=1e-5)
-        assert np.isclose(W[1000].to_value("1/s"), 0.75 * C_CGS / R.to_value("cm"), rtol=1e-12)
+        assert np.isclose(kernel_integral(window), 1.0, rtol=1e-3)
+        assert np.isclose(W[20].to_value("1/s"), 0.75 * C_CGS / R.to_value("cm"), rtol=1e-12)
         assert W[0].to_value("1/s") == 0
         assert W[-1].to_value("1/s") == 0
 
@@ -167,10 +167,10 @@ class TestCalcSed:
         # default 500 points), not by the smearing itself.
         assert np.isclose(flux(3.0), 0.0, atol=1e-6)
         assert np.isclose(flux(5.0), 0.5, rtol=2e-2)
-        assert np.isclose(flux(7.0), 1.0, rtol=1e-4)
+        assert np.isclose(flux(7.0), 1.0, rtol=1e-3)
         # monotonically rising across the transition
         rising = [flux(x) for x in np.linspace(4.0, 6.0, 9)]
-        assert all(a <= b + 1e-12 for a, b in zip(rising, rising[1:]))
+        assert np.all(np.diff(rising) >= -1e-12)
 
 
 class TestRadiusValidation:

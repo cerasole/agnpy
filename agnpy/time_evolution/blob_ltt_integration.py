@@ -30,19 +30,6 @@ All times in this module are blob-frame times. Convert an observer-frame time wi
 :func:`~agnpy.utils.conversion.lab_time_to_blob_time`. Nothing here needs z or delta_D: the SED
 evaluation reads them from the blob itself.
 
-Choosing kernel_points_size
----------------------------
-The quadrature converges at second order, and in practice the error is dominated by the kernel
-sampling rather than by the density of blob snapshots. Measured against a 6400-point reference
-for a synchrotron-cooling blob, with snapshot spacing between 1/100 and 1/15 of the window
-width (the two agreed to within a factor 1.3):
-
-    50 points -> 1e-3      200 points -> 8e-5      1000 points -> 2e-6
-    100 points -> 3e-4     500 points -> 1e-5      2000 points -> 6e-7
-
-The default of 500 therefore gives about 1e-5 relative accuracy, and raising it is cheap since
-the kernel is precomputed.
-
 Usage
 -----
 The simplest usage: build the integrator, then call for_time(time).calc_sed() on it, to get the SED:
@@ -75,9 +62,9 @@ which can help the caller know how far to run the simulation and which snapshots
 
     integrator = ltt_integrator_constant_radius(blob.R_b, nu_obs=nu)
 
-    # 1. Suppose we want the SED at t=0
+    # 1. Suppose we want the SED at t=0 (note: all times in this example are in the blob frame)
     start_window = integrator.for_time(0 * u.s)
-    lead = -start_window.start_time # will be negetive, hence multiply by -1
+    lead = -start_window.start_time # will be negative, so multiply by -1 to get absolute value of the additional simulation time needed
     tail = start_window.end_time
 
     # 2. start the run `lead` earlier, and run until "lead+tail" time
@@ -93,7 +80,7 @@ which can help the caller know how far to run the simulation and which snapshots
 
 Warning:
 
-    The times passed to :meth:`BlobLTTWindow.calc_sed` must be on the same clock as the time
+    The times passed to :meth:`BlobLTTWindow.calc_sed` must use the same t=0 reference point as times
     passed to :meth:`BlobLTTIntegrator.for_time`. ``TimeEvolution`` always reports elapsed time
     from zero, so a run started ``lead`` early must subtract ``lead`` when recording snapshot
     times. Getting this wrong shifts every SED by ``lead`` and ``calc_sed`` will
@@ -254,10 +241,9 @@ class BlobLTTWindow:
 
         if t_s.size == 1:
             # Frozen state across the whole window; no interpolation needed.
-            weights = W_cgs
             if no_state_before_first:
-                weights = np.where(t_sample < t_s[0], 0.0, W_cgs)
-            return (table[:, 0] * np.trapz(weights, tau_s)) << _SED_UNIT
+                W_cgs = np.where(t_sample < t_s[0], 0.0, W_cgs)
+            return (table[:, 0] * np.trapz(W_cgs, tau_s)) << _SED_UNIT
 
         if no_state_before_first:
             # Clip only the top; interp1d zero-fills below times[0].
@@ -398,7 +384,7 @@ def ltt_integrator_constant_radius(
     R: u.Quantity,
     nu_obs: u.Quantity,
     *,
-    kernel_points_size: int = 500,
+    kernel_points_size: int = 50,
     sed_flux_fn=None,
 ) -> BlobLTTIntegrator:
     """
@@ -411,8 +397,9 @@ def ltt_integrator_constant_radius(
     nu_obs : :class:`~astropy.units.Quantity`
         Observed frequencies the SEDs are evaluated at.
     kernel_points_size : int
-        Number of quadrature points across the blob diameter; the default gives roughly 1e-5
-        relative accuracy. See "Choosing kernel_points_size" in the module documentation.
+        Number of quadrature points across the blob diameter. The default gives roughly 1e-3
+        relative accuracy; the quadrature is second order, so doubling it cuts the error by
+        about four. Raising it is cheap, as the kernel is computed once.
     sed_flux_fn : callable, optional
         ``f(blob, nu) -> Quantity[erg / (cm2 s)]``. Defaults to Synchrotron + SSC; override to
         add external Compton or absorption.

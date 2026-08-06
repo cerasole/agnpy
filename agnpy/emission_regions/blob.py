@@ -402,3 +402,9 @@ class Blob:
         # not included in Dermer and Finke's papers
         u_synch *= 3 / 4
         return u_synch.to("erg/cm3")
+
+    def lab_time_to_blob_time(self, t_lab: u.Quantity) -> u.Quantity:
+        """
+        Convert observer (lab)-frame time to blob-frame time
+        """
+        return t_lab * self.delta_D / (1.0 + self.z)
