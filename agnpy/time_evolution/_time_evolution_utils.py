@@ -221,7 +221,7 @@ def merge_points(x, y, merge_groups, interpolated_distribution):
 def remove_empty_densities(result: TimeEvaluationResult) -> TimeEvaluationResult:
     mask = result.density > 0
     return TimeEvaluationResult(
-        result.total_time,
+        result.blob_time,
         result.gamma[mask],
         result.density[mask],
         remap_subgroups_density(mask_to_mapping(mask), result.density_subgroups),

@@ -17,7 +17,12 @@ class FnParams:
     density_subgroups: NDArray
 
 class TimeEvaluationResult(NamedTuple):
-    total_time: Quantity
+    """
+    The state of the blob at one point of a time evolution. Note that `blob_time` is the time on the blob's clock,
+     i.e. `TimeEvolution.t0` plus the elapsed simulation time - which means it is an instant, not a duration
+     (with the default `t0` of zero it equals the elapsed time, but with an offset `t0` it does not).
+    """
+    blob_time: Quantity
     gamma: NDArray
     density: Quantity
     density_subgroups: NDArray

@@ -5,5 +5,4 @@ from .types import *
 from .blob_ltt_integration import (
     BlobLTTIntegrator,
     BlobLTTWindow,
-    ltt_integrator_constant_radius,
 )

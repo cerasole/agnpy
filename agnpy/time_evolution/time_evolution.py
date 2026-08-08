@@ -52,8 +52,8 @@ class TimeEvolution:
         The blob for which the time evolution will be performed. As a result of the time evolution,
         the blob.n_e will be replaced with the InterpolatedDistribution.
         If `expansion` is set, blob.R_b and blob.B will also be updated as the time evolution progresses.
-    total_time :
-         Total time for the calculation
+    total_duration_time :
+         Total duration of the time evolution (in blob frame)
     energy_change_functions :
          A function, or an array of functions, to be used for calculation of energy change rate for gamma values.
          For energy gain processes, function should return positive values; for loss, negative values.
@@ -109,6 +109,20 @@ class TimeEvolution:
     distribution_change_callback :
         This optional function will be called each time the blob's electron distribution has been updated.
         You can use it, for example, for updating the distribution plot while the simulation is running.
+    t0 : Quantity or the number 0
+        The time on blob's clock when the simulation starts. By default it is the plain number
+        0, which is accepted regardless of unit since zero is the same instant in any time unit;
+        pass a time Quantity to add an offset (positive or negative). It does not impact the
+        simulation process, but it will shift the time reported by the `TimeEvaluationResult`
+        passed to the `distribution_change_callback` function and returned at the end of the
+        `evaluate` method.
+        For example, if total simulation duration is 100 s, and you set t0 = -30 s, then the
+        time reported by the `TimeEvaluationResult` at the end of the simulation will be 70 s, and intermediate times
+        reported in the callbacks will progress from -30s to 70s.
+        Must be a scalar time Quantity, or plain 0. When given as a Quantity, its unit becomes
+        the unit of the reported `blob_time`, regardless of `total_duration_time`'s unit; the
+        default 0 reports `blob_time` in `total_duration_time`'s unit.
+        See the `blob_ltt_integration` module for an example of practical usage of this parameter.
     expansion :
         Optional BlobExpansion describing a constant-rate growth of the blob radius: R(t) = R_0 + v_exp * t.
         When set, three effects are modelled consistently:
@@ -121,7 +135,7 @@ class TimeEvolution:
 
     def __init__(self,
                  blob: Blob,
-                 total_time: Quantity,
+                 total_duration_time: Quantity,
                  energy_change_functions: EnergyChangeFns = None,
                  rel_injection_functions: InjectionRelFns = None,
                  abs_injection_functions: InjectionAbsFns = None,
@@ -139,10 +153,11 @@ class TimeEvolution:
                  subgroups: SubgroupsList = None,
                  subgroups_initial_density: NDArray[np.floating] =None,
                  distribution_change_callback: CallbackFnType = None,
+                 t0: Quantity = 0,
                  expansion: BlobExpansion = None):
         self._blob = blob
         self._expansion = expansion
-        self._total_time_sec = total_time.to("s")
+        self._total_duration_sec = total_duration_time.to("s")
         if isinstance(step_duration, Quantity):
             self._step_duration = step_duration.to("s")
         elif isinstance(step_duration, str) and step_duration == "auto":
@@ -244,6 +259,16 @@ class TimeEvolution:
         if subgroups_initial_density is not None and initial_gamma_array is not None and subgroups_initial_density.shape[1] != len(initial_gamma_array):
             raise ValueError("Incorrect shape for subgroups_initial_density")
         self._distribution_change_callback = distribution_change_callback
+        if isinstance(t0, Quantity):
+            if t0.unit.physical_type != "time":
+                raise ValueError(f"t0 must be a time Quantity, got {t0!r}")
+            if not t0.isscalar:
+                raise ValueError(f"t0 must be a scalar Quantity, got shape {t0.shape}")
+        elif isinstance(t0, (int, float)) and t0 == 0:
+            t0 = 0 * total_duration_time.unit
+        else:
+            raise ValueError(f"t0 must be a time Quantity, or the number 0, got {t0!r}")
+        self._t0 = t0
 
     def _calculate_initial_values(self):
         gm_bins_lb = self._initial_gamma_array
@@ -282,10 +307,11 @@ class TimeEvolution:
 
         gm_bins, density, subgroups_density, en_chg_rates, rel_injection_rates, abs_injection_rates = self._calculate_initial_values()
         total_time_elapsed = 0 * u.s
-        log.info("Progress: %3d%% %s (%i bins)", 0, total_time_elapsed, gm_bins.shape[-1])
+        blob_time = self._t0 + total_time_elapsed
+        log.info("Progress: %3d%% %s (%i bins)", 0, blob_time, gm_bins.shape[-1])
         time_left_per_bin = np.zeros_like(gm_bins[0]) * u.s
 
-        while total_time_elapsed < self._total_time_sec:
+        while total_time_elapsed < self._total_duration_sec:
             en_bins = to_erg(gm_bins)
             en_chg_rates_grouped, rel_injection_rates_grouped, abs_injection_rates_grouped = self._group_change_rates(
                 gm_bins, en_chg_rates, rel_injection_rates, abs_injection_rates)
@@ -307,8 +333,8 @@ class TimeEvolution:
                     step_time = np.min(time_left_per_bin)
                 else:
                     step_time = np.min(max_times)
-            if step_time > self._total_time_sec - total_time_elapsed:
-                step_time = self._total_time_sec - total_time_elapsed
+            if step_time > self._total_duration_sec - total_time_elapsed:
+                step_time = self._total_duration_sec - total_time_elapsed
 
             gm_bins, density, subgroups_density, mapping = self._apply_time_changes(
                 en_bins, density, subgroups_density, en_chg_rates_grouped, total_injection_rates_grouped, step_time)
@@ -343,15 +369,16 @@ class TimeEvolution:
                     gm_bins[0], {EXPANSION_DILUTION_KEY: self._rel_injection_functions[EXPANSION_DILUTION_KEY]},
                     density, subgroups_density))
             total_time_elapsed += step_time
+            blob_time = self._t0 + total_time_elapsed
             if self._distribution_change_callback is not None:
-                self._distribution_change_callback(TimeEvaluationResult(total_time_elapsed,
+                self._distribution_change_callback(TimeEvaluationResult(blob_time,
                     gm_bins[0], density, subgroups_density, energy_changes_lb(en_chg_rates), rel_injection_rates,
                     abs_injection_rates))
-            progress_percent = int((100 * total_time_elapsed / self._total_time_sec).round(0))
-            log.info("Progress: %3d%% %s (%i bins)", progress_percent, total_time_elapsed, gm_bins.shape[-1])
+            progress_percent = int((100 * total_time_elapsed / self._total_duration_sec).round(0))
+            log.info("Progress: %3d%% %s (%i bins)", progress_percent, blob_time, gm_bins.shape[-1])
 
         en_chg_rates_lb = energy_changes_lb(en_chg_rates)
-        return TimeEvaluationResult(total_time_elapsed, gm_bins[0], density, subgroups_density, en_chg_rates_lb, rel_injection_rates, abs_injection_rates)
+        return TimeEvaluationResult(blob_time, gm_bins[0], density, subgroups_density, en_chg_rates_lb, rel_injection_rates, abs_injection_rates)
 
     def _advance_expansion(self, time_interval):
         blob = self._blob
