@@ -5,4 +5,5 @@ from .types import *
 from .blob_ltt_integration import (
     BlobLTTIntegrator,
     BlobLTTWindow,
+    calc_seds_over_time,
 )

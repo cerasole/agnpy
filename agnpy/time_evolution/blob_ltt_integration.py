@@ -32,10 +32,6 @@ SED evaluation reads them from the blob itself.
 
 Usage
 -----
-The simplest usage: build the integrator, then call for_time(time).calc_sed() on it, to get the SED:
-
-    from agnpy.time_evolution import BlobLTTIntegrator
-
     # build the integrator:
     integrator = BlobLTTIntegrator(blob.R_b, nu_obs=nu)
 
@@ -44,23 +40,29 @@ The simplest usage: build the integrator, then call for_time(time).calc_sed() on
     integration_window = integrator.for_time(blob.lab_time_to_blob_time(t_obs))
     start = integration_window.start_time # (can be negative, but it's fine!)
     end = integration_window.end_time
-    # if window start time > current simulation start time, catch up to it first:
-    TimeEvolution(blob, total_duration_time=(start-now), t0=now).evaluate()
-    # then make a list for blobs and corresponding times, and run the simulation from start till end
-    # of window. Seed the list with the state at `start`: the callback only fires after a step has
-    # been taken, so it never reports the state at t0 itself.
+
+    # run the simulation till end time, gathering a list of blob state snapshots over the integration_window time span:
     snapshots = [(start, deepcopy(blob))]
     def callback(result):
         snapshots.append((result.blob_time, deepcopy(blob)))
     TimeEvolution(blob, total_duration_time=(end-start), t0=start,
                   distribution_change_callback=callback).evaluate()
-    # do NOT append a final snapshot here: the last callback already fired at exactly `end`, and
-    # evaluate() returns that same time, so appending again would duplicate it.
+
     # finally, ask for the smeared SED, passing the (time, blob) snapshots:
     sed = integration_window.calc_sed(snapshots)
-    # ... and proceed with a loop (note: the above example does not handle
-    # the cases when windows from consecutive data points overlap - in such case you can reuse part of previously
-    # cached snapshots)
+    # ... and proceed with a loop
+
+For the common case, when you know the list of time points for which you want to evaluate the SEDs, you can use a helper
+function `calc_seds_over_time`, which already implements this workflow:
+
+    seds = calc_seds_over_time(
+        blob, # initial blob state
+        times, # a sorted list of times for which you need SEDs
+        nu_obs, # energy points for SED
+        energy_change_functions=synchrotron_loss(Synchrotron(blob)) # any params needed for TimeEvolution constructor
+    )
+
+Notes:
 
 The snapshots must bracket the window: the first one at or before
 :attr:`BlobLTTWindow.start_time`, the last at or after :attr:`BlobLTTWindow.end_time`, so that
@@ -68,14 +70,13 @@ every point of the integral is reached by interpolation and never by extrapolati
 :meth:`BlobLTTWindow.calc_sed` refuses to integrate otherwise, rather than quietly returning a
 flux that is too faint.
 
-Warning:
-
-    The times passed to :meth:`BlobLTTWindow.calc_sed` must use the same t=0 reference point as times
-    passed to :meth:`BlobLTTIntegrator.for_time`. Pass ``t0`` to the ``TimeEvolution`` constructor
-    to align the two: it shifts the time reported to the callback onto the same clock, so no manual
-    offsetting is needed.
+The times passed to :meth:`BlobLTTWindow.calc_sed` must use the same t=0 reference point as times
+passed to :meth:`BlobLTTIntegrator.for_time`. Pass ``t0`` to the ``TimeEvolution`` constructor
+to align the two: it shifts the time reported to the callback onto the same clock, so no manual
+offsetting is needed.
 """
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Sequence, Tuple
 
@@ -85,10 +86,12 @@ from astropy.constants import c as c_light
 from scipy.interpolate import interp1d
 
 from agnpy import Blob
+from agnpy.time_evolution.time_evolution import TimeEvolution
 
 __all__ = [
     "BlobLTTIntegrator",
     "BlobLTTWindow",
+    "calc_seds_over_time",
 ]
 
 # Speed of light in CGS. All internal arrays are plain floats in CGS; Quantity is used only at
@@ -158,7 +161,12 @@ class BlobLTTWindow:
         """
         return self._quadrature_times_s[-1] * u.s
 
-    def calc_sed(self, snapshots: Sequence[Tuple[u.Quantity, Blob]]) -> u.Quantity:
+    def calc_sed(
+        self,
+        snapshots: Sequence[Tuple[u.Quantity, Blob]],
+        *,
+        nu_obs: u.Quantity = None,
+    ) -> u.Quantity:
         """
         Integrate the blob states over the window to get the observed, smeared SED.
 
@@ -175,11 +183,15 @@ class BlobLTTWindow:
             to :meth:`BlobLTTIntegrator.for_time`. Each blob must be an independent snapshot:
             ``TimeEvolution`` mutates one blob in place, so appending the live object repeatedly
             yields N references to a single final state.
+        nu_obs : :class:`~astropy.units.Quantity`, optional
+            Observed frequencies to evaluate the SED at, overriding the integrator's own
+            ``nu_obs`` for this call only.
 
         Returns
         -------
         :class:`~astropy.units.Quantity`
-            Flux at each frequency of the integrator's ``nu_obs``, in erg / (cm2 s).
+            Flux at each frequency of ``nu_obs`` if given, otherwise of the integrator's own
+            ``nu_obs``, in erg / (cm2 s).
 
         Raises
         ------
@@ -189,6 +201,7 @@ class BlobLTTWindow:
             bracket the window.
         """
         integrator = self._integrator
+        nu_hz = nu_obs.to("Hz") if nu_obs is not None else integrator._nu_hz
 
         if len(snapshots) < 2:
             raise ValueError(
@@ -212,7 +225,7 @@ class BlobLTTWindow:
         integrator._validate_radii(snapshots_s)
         self._validate_coverage(snapshot_times_s)
 
-        table = integrator._sed_table(snapshots_s)  # (n_nu, n_snapshots)
+        table = integrator._sed_table(snapshots_s, nu_hz)  # (n_nu, n_snapshots)
 
         quadrature_times_s = self._quadrature_times_s
         # The snapshots bracket the window, so this only pulls the endpoints back inside the
@@ -300,8 +313,8 @@ class BlobLTTIntegrator:
         self._sed_flux_fn = sed_flux_fn if sed_flux_fn is not None else _default_sed_flux
         # R and the sampling are fixed, so the kernel never changes: compute it once.
         self._tau_s, self._W_cgs = _constant_kernel_cgs(R_cm, kernel_points_size)
-        # snapshot time [s] -> (id(blob), sed row); see _sed_table.
-        self._sed_cache: dict[float, tuple[int, np.ndarray]] = {}
+        # (snapshot time [s], nu_obs bytes) -> (id(blob), sed row); see _sed_table.
+        self._sed_cache: dict[tuple[float, bytes], tuple[int, np.ndarray]] = {}
 
     @property
     def R(self) -> u.Quantity:
@@ -349,30 +362,157 @@ class BlobLTTIntegrator:
                     "must share the integrator's radius."
                 )
 
-    def _sed_table(self, snapshots_s: Sequence[Tuple[float, Blob]]) -> np.ndarray:
+    def _sed_table(
+        self, snapshots_s: Sequence[Tuple[float, Blob]], nu_hz: u.Quantity
+    ) -> np.ndarray:
         """
         SED of every snapshot as an (n_nu, n_snapshots) array, reusing cached rows.
 
-        A cached row is reused only when the blob at that time is the same object, so a
-        recomputed or replaced snapshot is re-evaluated. Afterwards the cache is pruned to the
-        times passed in, which both keeps it bounded and guarantees every cached id belongs to
-        a blob the caller still holds -- so ids cannot have been recycled behind our back.
+        A cached row is reused only when the blob at that time is the same object *and* it was
+        computed for this same ``nu_hz`` grid.
         """
         cache = self._sed_cache
-        table = np.empty((self._nu_hz.size, len(snapshots_s)), dtype=float)
-        fresh: dict[float, tuple[int, np.ndarray]] = {}
+        nu_key = nu_hz.to_value("Hz").tobytes()
+        table = np.empty((nu_hz.size, len(snapshots_s)), dtype=float)
+        fresh: dict[tuple[float, bytes], tuple[int, np.ndarray]] = {}
 
         for i, (t, blob) in enumerate(snapshots_s):
-            key = float(t)
+            key = (float(t), nu_key)
             cached = cache.get(key)
             if cached is not None and cached[0] == id(blob):
                 row = cached[1]
             else:
                 row = np.asarray(
-                    self._sed_flux_fn(blob, self._nu_hz).to_value(_SED_UNIT), dtype=float
+                    self._sed_flux_fn(blob, nu_hz).to_value(_SED_UNIT), dtype=float
                 )
             table[:, i] = row
             fresh[key] = (id(blob), row)
 
         self._sed_cache = fresh
         return table
+
+
+# Constructor arguments calc_seds_over_time manages itself and refuses to accept from the caller.
+_RESERVED_TIME_EVOLUTION_KWARGS = frozenset(
+    {"blob", "total_duration_time", "t0", "distribution_change_callback"}
+)
+
+def calc_seds_over_time(
+    blob: Blob,
+    times: u.Quantity,
+    nu_obs: u.Quantity,
+    *,
+    kernel_points_size: int = 50,
+    sed_flux_fn=None,
+    assume_steady_before_start: bool = True,
+    **time_evolution_kwargs,
+) -> list[u.Quantity]:
+    """
+   Utility function to run TimeEvolution starting from time = 0 over ``times`` and return the light-travel-time smeared SED at each one.
+
+    Parameters
+    ----------
+    blob : :class:`~agnpy.emission_regions.Blob`
+        The blob in its state at blob-frame time 0. Mutated in place.
+    times : :class:`~astropy.units.Quantity`
+        Blob-frame times to compute the SED at, strictly increasing.
+    nu_obs : :class:`~astropy.units.Quantity`
+        Observed frequencies the SEDs are evaluated at; forwarded to :class:`BlobLTTIntegrator`.
+    kernel_points_size, sed_flux_fn
+        Forwarded to :class:`BlobLTTIntegrator`.
+    assume_steady_before_start : bool
+        The first requested time's window may reach before blob-frame time 0, if its
+        light-crossing margin is larger than ``times[0]`` itself. When ``True`` (the default),
+        ``blob``'s given state is treated as unchanged for as far back that window needs --
+        the same assumption the manual workflow above makes implicitly by seeding at
+        ``start_time`` rather than at 0. When ``False``, that situation raises instead, naming
+        how much earlier ``blob``'s history would need to start.
+    **time_evolution_kwargs
+        Forwarded to every internal :class:`~agnpy.time_evolution.TimeEvolution` call, e.g.
+        ``energy_change_functions``, ``max_energy_change_per_interval``, ``method``. Must not
+        include ``blob``, ``total_duration_time``, ``t0`` or ``distribution_change_callback``,
+        which this function manages itself. Passing ``expansion`` is not meaningful here: this
+        integrator assumes a constant radius, so an expanding blob's later snapshots will fail
+        the radius check in :meth:`BlobLTTWindow.calc_sed`.
+
+    Returns
+    -------
+    list of :class:`~astropy.units.Quantity`
+        One SED per entry in ``times``, each of shape ``nu_obs.shape``, in erg / (cm2 s).
+    """
+    conflicting = _RESERVED_TIME_EVOLUTION_KWARGS & time_evolution_kwargs.keys()
+    if conflicting:
+        raise ValueError(
+            f"calc_seds_over_time manages {sorted(conflicting)} itself; do not pass "
+            "them in time_evolution_kwargs"
+        )
+
+    times = u.Quantity(times)
+    if times.isscalar:
+        times = times.reshape(1)
+    if len(times) == 0:
+        return []
+    if len(times) > 1 and not np.all(np.diff(times.to_value("s")) > 0):
+        # We could sort them here, but it's probably better to let the user do it
+        # (passing unsorted times might be a sign of a user mistake, so if we sort them, we will mask the problem)
+        raise ValueError("times must be strictly increasing")
+
+    integrator = BlobLTTIntegrator(
+        blob.R_b, nu_obs, kernel_points_size=kernel_points_size, sed_flux_fn=sed_flux_fn
+    )
+
+    snapshots = []
+    first_start = integrator.for_time(times[0]).start_time
+    initial_state_snapshot = deepcopy(blob)
+    now = 0 * u.s
+    if first_start < now:
+        if assume_steady_before_start:
+            snapshots.append((first_start, initial_state_snapshot))
+        else:
+            raise ValueError(
+                f"The window for the first requested time starts at {first_start}, before "
+                f"blob-frame time 0. Give blob a history starting {-first_start} earlier, or pass "
+                "assume_steady_before_start=True to treat its given state as unchanged that far back."
+            )
+
+    snapshots.append((now, initial_state_snapshot))
+
+    def callback(result):
+        snapshots.append((result.blob_time, deepcopy(blob)))
+
+    seds = []
+    for t in times:
+        window = integrator.for_time(t)
+
+        if window.start_time > now:
+            # just fast-forward to the start of the window
+            TimeEvolution(
+                blob, total_duration_time=(window.start_time - now),
+                **time_evolution_kwargs,
+            ).evaluate()
+            now = window.start_time
+            # take a snapshot at the start of the window
+            snapshots.append((now, deepcopy(blob)))
+
+        if window.end_time > now:
+            # proceed till the end of the window, gathering snapshots on the way
+            TimeEvolution(
+                blob, total_duration_time=(window.end_time - now), t0=now,
+                distribution_change_callback=callback, **time_evolution_kwargs,
+            ).evaluate()
+            now = window.end_time
+
+        # drop earlier snapshots no longer needed now
+        keep_from = 0
+        for i, (snap_t, _) in enumerate(snapshots):
+            if snap_t <= window.start_time:
+                keep_from = i
+            else:
+                break
+        snapshots = snapshots[keep_from:]
+
+        # finally, calculate the actual SED and add it to the final list
+        sed = window.calc_sed(snapshots)
+        seds.append(sed)
+
+    return seds

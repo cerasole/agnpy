@@ -1,4 +1,6 @@
 from copy import deepcopy
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -7,7 +9,10 @@ from astropy.constants import c, m_e
 
 from agnpy import Blob, Synchrotron, SynchrotronSelfCompton
 from agnpy.spectra import PowerLaw
-from agnpy.time_evolution import BlobLTTIntegrator, TimeEvolution, synchrotron_loss
+from agnpy.time_evolution import (
+    BlobLTTIntegrator, TimeEvolution, synchrotron_loss, calc_seds_over_time,
+)
+import agnpy.time_evolution.blob_ltt_integration as blob_ltt_integration
 from agnpy.time_evolution.blob_ltt_integration import _constant_kernel_cgs
 
 C_CGS = c.to_value("cm/s")
@@ -266,6 +271,57 @@ class TestSedCache:
         window.calc_sed(snapshots)
         assert len(calls) == 7
 
+    def test_calc_sed_accepts_a_nu_obs_override(self):
+        """An override changes what calc_sed returns, without touching the integrator's own grid."""
+        def freq_echo_sed(blob, nu):
+            return nu.to_value("Hz") * SED_UNIT
+
+        integrator = BlobLTTIntegrator(1e16 * u.cm, [1e15] * u.Hz, sed_flux_fn=freq_echo_sed)
+        lc = (1e16 * u.cm / c).to_value("s")
+        window = integrator.for_time(2 * lc * u.s)
+        times = np.linspace(0, 4 * lc, 5) * u.s
+        snapshots = [(t, make_blob()) for t in times]
+
+        override_nu = np.array([2e15, 3e15]) * u.Hz
+        sed = window.calc_sed(snapshots, nu_obs=override_nu)
+        assert sed.shape == override_nu.shape
+        assert u.allclose(sed, override_nu.to_value("Hz") * SED_UNIT, rtol=1e-3)
+
+        # no nu_obs given -> still the integrator's own grid
+        default_sed = window.calc_sed(snapshots)
+        assert default_sed.shape == (1,)
+        assert u.isclose(default_sed[0], 1e15 * SED_UNIT, rtol=1e-3)
+
+    def test_switching_nu_obs_does_not_contaminate_and_reuses_by_value(self):
+        """
+        Overriding nu_obs must not serve back rows cached for a different grid (in either
+        direction), but two calls that happen to reconstruct an equal grid from scratch should
+        still hit the cache.
+        """
+        calls = []
+
+        def counting_sed(blob, nu):
+            calls.append(1)
+            return np.full(len(nu), 1.0) * SED_UNIT
+
+        integrator = BlobLTTIntegrator(1e16 * u.cm, [1e15] * u.Hz, sed_flux_fn=counting_sed)
+        lc = (1e16 * u.cm / c).to_value("s")
+        window = integrator.for_time(2 * lc * u.s)
+        times = np.linspace(0, 4 * lc, 5) * u.s
+        snapshots = [(t, make_blob()) for t in times]
+
+        default_sed_1 = window.calc_sed(snapshots)
+        assert len(calls) == 5
+
+        # switching to an override grid must not reuse the default grid's cached rows
+        override_grid = np.logspace(11, 20, 5) * u.Hz
+        window.calc_sed(snapshots, nu_obs=override_grid)
+        assert len(calls) == 10
+
+        # a different object with the SAME values, called immediately after, hits the cache
+        same_values_new_object = np.logspace(11, 20, 5) * u.Hz
+        window.calc_sed(snapshots, nu_obs=same_values_new_object)
+        assert len(calls) == 10
 
 class TestValidation:
     def _window(self):
@@ -370,3 +426,109 @@ class TestDocumentedWorkflow:
         assert np.all(np.isfinite(sed.to_value(SED_UNIT)))
         assert np.isclose(sed[0].to_value(SED_UNIT), 1.0, rtol=1e-3)
 
+
+class _FakeTimeEvolution:
+    """
+    A stub for TimeEvolution in call-sequence tests: runs no real physics, just fires the
+    distribution_change_callback once, at t0 + total_duration_time, so calc_seds_over_time's
+    logic (snapshot bracketing, `now` advancement) does not fail.
+    """
+
+    def __init__(self, blob, total_duration_time, t0=0 * u.s,
+                 distribution_change_callback=None, **kwargs):
+        self._callback = distribution_change_callback
+        self._end = t0 + total_duration_time
+
+    def evaluate(self):
+        if self._callback is not None:
+            self._callback(SimpleNamespace(blob_time=self._end))
+
+
+class TestCalcSedsOverTime:
+
+    R = 1e16 * u.cm
+    nu = np.logspace(11, 24, 6) * u.Hz
+
+    def _lc(self):
+        """ Radius light-crossing time """
+        return (self.R / c).to_value("s")
+
+    def test_matches_the_manual_workflow(self):
+        """The automated loop must correctly proceed to start/end of window for each time point of interest:
+         0, 3, 4, 6 and 9 (in units or radius light-crossing), according to this timeline:
+
+              *           *   *       *           *
+         -1   0   1   2   3   4   5   6   7   8   9   10   (time, in R/c)
+              ---->                                        (run simulation till end of window for time=0; steady state is assume for time < 0)
+                   ===>                                    (fast forward to start of window for time=3)
+                       ------->                            (run simulation till end of window for time=3)
+                               --->                        (run simulation till end of window for time=4, which is also start of window for time=6)
+                                   ------->                (run simulation till end of window for time=6)
+                                           ===>            (fast forward to start of window for time=9)
+                                               ------->    (run simulation till end of window for time=9)
+
+        This is checked by mocking TimeEvolution and asserting the sequence of
+        (total_duration_time, t0, distribution_change_callback) it is constructed with.
+        "---->" segments run to the end of a window and must have a callback
+        attached, to gather the snapshots that window's SED needs. "===>" segments are
+        fast-forwards through an already-covered gap with no window boundary inside it; their
+        `evaluate()` result is never read back, so their exact t0 and whether a callback is
+        attached are left unconstrained here (marked None below) -- only their duration matters.
+        """
+        lc = self._lc()
+        times = np.array([0, 3 * lc, 4 * lc, 6 * lc, 9 * lc]) * u.s
+
+        # (total_duration_time, t0, has_callback) for every segment in the diagram above, in units of lc
+        expected_calls = [
+            (1, 0, True),
+            (1, None, None),  # fast-forward: t0/callback unconstrained
+            (2, 2, True),
+            (1, 4, True),
+            (2, 5, True),
+            (1, None, None),  # fast-forward
+            (2, 8, True),
+        ]
+
+        blob = make_blob(self.R)
+        with patch.object(
+            blob_ltt_integration, "TimeEvolution", side_effect=_FakeTimeEvolution
+        ) as mock_time_evolution:
+            calc_seds_over_time(
+                blob, times, self.nu,
+                energy_change_functions=synchrotron_loss(Synchrotron(blob)),
+            )
+
+        assert mock_time_evolution.call_count == len(expected_calls)
+        for call, (expected_duration, expected_t0, expects_callback) in zip(
+            mock_time_evolution.call_args_list, expected_calls
+        ):
+            _, kwargs = call
+            assert u.isclose(kwargs["total_duration_time"], expected_duration * lc * u.s)
+            if expected_t0 is not None:
+                assert u.isclose(kwargs.get("t0", 0 * u.s), expected_t0 * lc * u.s)
+            if expects_callback is not None:
+                callback = kwargs.get("distribution_change_callback")
+                assert (callback is not None) == expects_callback
+
+
+    def test_overlapping_windows_reuse_snapshots_instead_of_resimulating(self):
+        """Heavily overlapping windows must not be independently re-simulated from scratch."""
+        lc = self._lc()
+        calls = []
+
+        def counting_sed(blob, nu):
+            calls.append(1)
+            return np.full(len(nu), 1.0) * SED_UNIT
+
+        blob = make_blob(self.R)
+        tight_times = np.array([5 * lc, 5.1 * lc, 5.2 * lc, 5.3 * lc]) * u.s
+
+        calc_seds_over_time(
+            blob, tight_times, self.nu, sed_flux_fn=counting_sed,
+            energy_change_functions=synchrotron_loss(Synchrotron(blob)),
+            max_energy_change_per_interval=0.3,
+        )
+
+        # if each window re-simulated independently it would need dozens of evaluations per
+        # window; heavy reuse keeps the total far below that
+        assert len(calls) < 10 * len(tight_times)
