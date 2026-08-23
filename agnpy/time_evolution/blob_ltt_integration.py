@@ -33,7 +33,7 @@ SED evaluation reads them from the blob itself.
 Usage
 -----
     # build the integrator:
-    integrator = BlobLTTIntegrator(blob.R_b, nu_obs=nu)
+    integrator = BlobLTTIntegrator(blob.R_b)
 
     # then in the loop, for every data point that you want to calculate SED for, do:
     # find its timespan window :
@@ -48,8 +48,8 @@ Usage
     TimeEvolution(blob, total_duration_time=(end-start), t0=start,
                   distribution_change_callback=callback).evaluate()
 
-    # finally, ask for the smeared SED, passing the (time, blob) snapshots:
-    sed = integration_window.calc_sed(snapshots)
+    # finally, ask for the smeared SED, passing the (time, blob) snapshots and the frequencies:
+    sed = integration_window.calc_sed(snapshots, nu)
     # ... and proceed with a loop
 
 For the common case, when you know the list of time points for which you want to evaluate the SEDs, you can use a helper
@@ -164,8 +164,7 @@ class BlobLTTWindow:
     def calc_sed(
         self,
         snapshots: Sequence[Tuple[u.Quantity, Blob]],
-        *,
-        nu_obs: u.Quantity = None,
+        nu_obs: u.Quantity,
     ) -> u.Quantity:
         """
         Integrate the blob states over the window to get the observed, smeared SED.
@@ -183,15 +182,13 @@ class BlobLTTWindow:
             to :meth:`BlobLTTIntegrator.for_time`. Each blob must be an independent snapshot:
             ``TimeEvolution`` mutates one blob in place, so appending the live object repeatedly
             yields N references to a single final state.
-        nu_obs : :class:`~astropy.units.Quantity`, optional
-            Observed frequencies to evaluate the SED at, overriding the integrator's own
-            ``nu_obs`` for this call only.
+        nu_obs : :class:`~astropy.units.Quantity`
+            Observed frequencies to evaluate the SED at.
 
         Returns
         -------
         :class:`~astropy.units.Quantity`
-            Flux at each frequency of ``nu_obs`` if given, otherwise of the integrator's own
-            ``nu_obs``, in erg / (cm2 s).
+            Flux at each frequency of ``nu_obs``, in erg / (cm2 s).
 
         Raises
         ------
@@ -201,7 +198,7 @@ class BlobLTTWindow:
             bracket the window.
         """
         integrator = self._integrator
-        nu_hz = nu_obs.to("Hz") if nu_obs is not None else integrator._nu_hz
+        nu_hz = nu_obs.to("Hz")
 
         if len(snapshots) < 2:
             raise ValueError(
@@ -283,8 +280,6 @@ class BlobLTTIntegrator:
     ----------
     R : :class:`~astropy.units.Quantity`
         Blob radius in the blob frame; must be a scalar length.
-    nu_obs : :class:`~astropy.units.Quantity`
-        Observed frequencies the SEDs are evaluated at.
     kernel_points_size : int
         Number of quadrature points across the blob diameter. The default gives roughly 1e-3
         relative accuracy; the quadrature is second order, so doubling it cuts the error by
@@ -294,7 +289,7 @@ class BlobLTTIntegrator:
         add external Compton or absorption.
     """
 
-    def __init__(self, R: u.Quantity, nu_obs: u.Quantity, *,
+    def __init__(self, R: u.Quantity, *,
                  kernel_points_size: int = 50, sed_flux_fn=None):
         if not R.isscalar:
             raise ValueError(f"blob radius must be a scalar length, got shape {R.shape}")
@@ -308,8 +303,6 @@ class BlobLTTIntegrator:
 
         self._R = R.to("cm")
         self._R_cm = R_cm
-        self._nu_obs = nu_obs
-        self._nu_hz = nu_obs.to("Hz")
         self._sed_flux_fn = sed_flux_fn if sed_flux_fn is not None else _default_sed_flux
         # R and the sampling are fixed, so the kernel never changes: compute it once.
         self._tau_s, self._W_cgs = _constant_kernel_cgs(R_cm, kernel_points_size)
@@ -325,11 +318,6 @@ class BlobLTTIntegrator:
         :meth:`BlobLTTWindow.calc_sed`.
         """
         return self._R
-
-    @property
-    def nu_obs(self) -> u.Quantity:
-        """Frequencies the SEDs are evaluated at, as supplied."""
-        return self._nu_obs
 
     @property
     def kernel_points_size(self) -> int:
@@ -458,7 +446,7 @@ def calc_seds_over_time(
         raise ValueError("times must be strictly increasing")
 
     integrator = BlobLTTIntegrator(
-        blob.R_b, nu_obs, kernel_points_size=kernel_points_size, sed_flux_fn=sed_flux_fn
+        blob.R_b, kernel_points_size=kernel_points_size, sed_flux_fn=sed_flux_fn
     )
 
     snapshots = []
@@ -512,7 +500,7 @@ def calc_seds_over_time(
         snapshots = snapshots[keep_from:]
 
         # finally, calculate the actual SED and add it to the final list
-        sed = window.calc_sed(snapshots)
+        sed = window.calc_sed(snapshots, nu_obs)
         seds.append(sed)
 
     return seds
