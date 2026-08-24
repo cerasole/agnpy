@@ -561,3 +561,82 @@ class TestSpectraTimeEvolution:
 
         assert u.isclose(synchrotron_losses, synchrotron_radiation_total, rtol=0.3)
         assert u.isclose(ssc_losses, ssc_radiation_total, rtol=0.3)
+
+
+class TestT0Offset:
+    """
+    `t0` shifts the time reported by TimeEvaluationResult without affecting the simulation.
+    """
+
+    @staticmethod
+    def _blob():
+        n_e = PowerLaw(0.1 * u.Unit("cm-3"), 2.1, gamma_min=1e2, gamma_max=1e6, mass=m_e)
+        return Blob(n_e=n_e, delta_D=1)
+
+    def _run(self, duration, t0=0, collect=None):
+        blob = self._blob()
+        callback = None if collect is None else (lambda result: collect.append(result.blob_time))
+        return TimeEvolution(blob, duration, synchrotron_loss(Synchrotron(blob)),
+                             max_energy_change_per_interval=0.1,
+                             distribution_change_callback=callback, t0=t0).evaluate()
+
+    def test_defaults_to_zero_in_the_duration_unit(self):
+        assert u.isclose(self._run(60 * u.s).blob_time, 60 * u.s)
+        result = self._run(2 * u.min)
+        assert result.blob_time.unit == u.min
+        assert u.isclose(result.blob_time, 2 * u.min)
+
+    def test_offsets_the_reported_time(self):
+        """The documented example: duration 100 s with t0 = -30 s ends at 70 s."""
+        times = []
+        result = self._run(100 * u.s, t0=-30 * u.s, collect=times)
+
+        assert u.isclose(result.blob_time, 70 * u.s)
+        assert times[-1] == result.blob_time
+        # intermediate times progress from just after -30 s up to 70 s, monotonically
+        assert times[0] > -30 * u.s
+        assert np.all(np.diff(u.Quantity(times).to_value("s")) > 0)
+
+    def test_evaluate_returns_the_same_time_as_the_final_callback(self):
+        times = []
+        result = self._run(100 * u.s, t0=-30 * u.s, collect=times)
+        assert result.blob_time == times[-1]
+
+    def test_does_not_affect_the_simulation(self):
+        """Only the reported clock moves; the evolved distribution is identical."""
+        without = self._run(60 * u.s)
+        shifted = self._run(60 * u.s, t0=-1000 * u.s)
+        assert u.isclose(shifted.blob_time, -940 * u.s)
+        assert np.allclose(without.gamma, shifted.gamma)
+        assert u.allclose(without.density, shifted.density)
+
+    def test_reported_unit_follows_the_duration_unit(self):
+        result = self._run(2 * u.min, t0=-1 * u.min)
+        assert result.blob_time.unit == u.min
+        assert u.isclose(result.blob_time, 1 * u.min)
+
+    @pytest.mark.parametrize("t0", [30 * u.min, 30 * u.ms])
+    def test_any_time_unit_is_accepted(self, t0):
+        result = self._run(100 * u.s, t0=t0)
+        assert result.blob_time.unit == t0.unit
+        assert u.isclose(result.blob_time, t0 + 100 * u.s)
+
+    def test_non_time_unit_is_rejected(self):
+        with pytest.raises(ValueError, match="time Quantity"):
+            self._run(100 * u.s, t0=30 * u.cm)
+
+    @pytest.mark.parametrize("t0", [0, 0.0])
+    def test_plain_zero_is_accepted_regardless_of_type(self, t0):
+        """Plain 0 (int or float) is the default and is accepted explicitly too, in any duration unit."""
+        result = self._run(2 * u.min, t0=t0)
+        assert result.blob_time.unit == u.min
+        assert u.isclose(result.blob_time, 2 * u.min)
+
+    @pytest.mark.parametrize("t0", [-30.0, "-30s", None])
+    def test_non_zero_non_quantity_is_rejected(self, t0):
+        with pytest.raises(ValueError, match="time Quantity"):
+            self._run(100 * u.s, t0=t0)
+
+    def test_must_be_scalar(self):
+        with pytest.raises(ValueError, match="scalar Quantity"):
+            self._run(100 * u.s, t0=np.array([-30.0, -10.0]) * u.s)

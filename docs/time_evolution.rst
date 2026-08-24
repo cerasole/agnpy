@@ -38,7 +38,7 @@ TimeEvolution class
 The main entry point of the time evolution API is the :class:`~agnpy.time_evolution.TimeEvolution` class, which requires three parameters:
 
 * `blob` – a `Blob` object for which the evaluation will be performed;
-* `total_time` - a `Quantity` with the total evolution time, measured in the blob reference frame;
+* `total_duration_time` - a `Quantity` with the total evolution time, measured in the blob reference frame;
 * `energy_change_functions` - a function, or functions, for calculating energy change rates - see below for details.
 
 After constructing the `TimeEvolution` object, call the `evaluate` method:
@@ -148,12 +148,27 @@ indicate particle loss).
 
 * `method`
 * `distribution_change_callback`
+* `t0`
 * `expansion`
 
 The `method` parameter allows switching from the default Euler method to the more accurate, but slower, Heun
 method. The `distribution_change_callback` parameter accepts a user-defined function that is called after each
 time step and can be used to track the progress of the calculation.
 The `expansion` parameter enables modelling of an expanding blob - see the dedicated section below.
+
+The `t0` parameter sets the time on the blob's clock at which the simulation starts. It does not affect the
+simulation itself; it only shifts the `blob_time` reported by the `TimeEvaluationResult` - both the one returned
+by `evaluate` and those passed to `distribution_change_callback`. For example, with a total duration of 100 s and
+`t0 = -30 s`, the reported times progress from just above -30 s up to 70 s. The `t0` must be a scalar `Quantity` in any
+time unit, or plain `0`. If the `Quantity` is provided, the reported `blob_time` values will use its time unit.
+
+This is useful when several consecutive runs have to share one time axis: rather than tracking an offset by hand,
+each run is given the `t0` at which it begins, so every reported `blob_time` is directly comparable across runs.
+The :mod:`~agnpy.time_evolution.blob_ltt_integration` module relies on this; see its module documentation for a
+worked example.
+
+Note that no callback is invoked for the initial state at `t0` itself: the first call happens once a time step has
+been taken. The final callback reports the same `blob_time` as the value returned by `evaluate`.
 
 Blob expansion
 -----------------------------
