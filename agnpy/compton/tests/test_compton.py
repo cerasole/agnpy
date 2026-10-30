@@ -418,7 +418,7 @@ class TestInteractingBlobs:
         interacting_blobs_trapz = InteractingBlobs(blob_e, blob_t, integrator=np.trapz)
         interacting_blobs_trapz_loglog = InteractingBlobs(blob_e, blob_t, integrator=trapz_loglog)
 
-        nu = np.logspace(15, 27) * u.Hz
+        nu = np.logspace(15, 28) * u.Hz
         sed_interacting_blobs_trapz = interacting_blobs_trapz.sed_flux(nu)
         sed_interacting_blobs_trapz_loglog = interacting_blobs_trapz_loglog.sed_flux(nu)
 
@@ -433,5 +433,29 @@ class TestInteractingBlobs:
             "sed",
         )
 
-        # requires that the SED points deviate less than 40%
-        assert check_deviation(nu, sed_interacting_blobs_trapz_loglog, sed_interacting_blobs_trapz, 0.4)
+        # requires that the SED points deviate less than 20%
+        assert check_deviation(nu, sed_interacting_blobs_trapz_loglog, sed_interacting_blobs_trapz, 0.2, x_range=[1e15, 1e26] * u.Hz)
+
+    def test_interacting_blobs(self):
+        """Test the interacting blobs for unique blob."""
+        blob = Blob(R_b=1e15 * u.cm, z=0.1, delta_D=20, B=0.1 * u.G, n_e=PowerLaw(k=1e4 * u.Unit("cm-3"), p=2.0, gamma_min=1e2, gamma_max=1e6))
+        
+        interacting_blobs = InteractingBlobs(blob, blob)
+        ssc = SynchrotronSelfCompton(blob)
+        nu = np.logspace(15, 28) * u.Hz
+        sed_interacting_blobs = interacting_blobs.sed_flux(nu)
+        sed_ssc = ssc.sed_flux(nu)
+
+        make_comparison_plot(
+            nu,
+            sed_interacting_blobs,
+            sed_ssc,
+            "interacting blobs",
+            "synchrotron self-compton",
+            "Inverse Compton from interacting blobs, using the same blob as target",
+            f"{figures_dir_interacting_blobs}/comparison_with_ssc.png",
+            "sed",
+        )
+
+        # requires that the SED points deviate less than 20%
+        assert check_deviation(nu, sed_interacting_blobs, sed_ssc, 0.2, x_range=[1e15, 1e27] * u.Hz)

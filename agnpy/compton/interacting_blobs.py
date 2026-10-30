@@ -7,6 +7,8 @@ from .kernels import isotropic_kernel
 from ..synchrotron import Synchrotron
 from ..utils.math import (
     axes_reshaper,
+    gamma_e_to_integrate,
+    nu_to_integrate,
 )
 from ..utils.conversion import nu_to_epsilon_prime
 from ..radiative_process import RadiativeProcess
@@ -65,9 +67,6 @@ class InteractingBlobs(RadiativeProcess):
         R_min = min([self.blob_t.R_b, self.blob_e.R_b])
         z = self.blob_t.z
         d_L = self.blob_t.d_L
-
-        gamma_e_to_integrate = np.logspace(1, 9, 400)
-        nu_to_integrate = np.logspace(8, 22, 400) * u.Hz
 
         # energy density of synchrotron photons target, in the comoving frame of blob_t
         synch = Synchrotron(self.blob_t)
