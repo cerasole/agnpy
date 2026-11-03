@@ -5,9 +5,9 @@ from astropy.constants import e, h, c, m_e, sigma_T, mu0
 from ..utils.math import axes_reshaper, gamma_e_to_integrate
 from ..utils.conversion import nu_to_epsilon_prime, B_to_cgs, lambda_c_e
 from ..radiative_process import RadiativeProcess
+from scipy.special import kv
 
-
-__all__ = ["R", "nu_synch_peak", "Synchrotron"]
+__all__ = ["R", "G", "F", "nu_synch_peak", "Synchrotron"]
 
 e = e.gauss
 B_cr = 4.414e13 * u.G  # critical magnetic field
@@ -23,6 +23,16 @@ def R(x):
     term_2_denom = 1 + 1.353 * np.power(x, 2 / 3) + 0.217 * np.power(x, 4 / 3)
     return term_1_num / term_1_denom * term_2_num / term_2_denom * np.exp(-x)
 
+def F(x, logstep = 2, nsteps = 200):
+    logx = np.log10(x)
+    y = np.logspace(logx, logx + logstep, nsteps)
+    y = x * np.trapezoid( kv(5./3., y), y, axis = 0)
+    mask = x > 50
+    y[mask] = np.sqrt(np.pi * x[mask] / 2) * np.exp(-x[mask])
+    return y
+
+def G(x):
+    return x * kv(2./3., x)
 
 def nu_synch_peak(B, gamma, mass=m_e):
     """observed peak frequency for monoenergetic electrons
@@ -60,6 +70,21 @@ def single_particle_synch_power(B_cgs, epsilon, gamma, mass=m_e):
     prefactor = np.sqrt(3) * np.power(e, 3) * B_cgs / h
     return prefactor * R(x)
 
+def single_particle_unpol_synch_power(B_cgs, epsilon, gamma, mass=m_e):
+    """unpolarized synchrotron power for a single particle of mass m_e,
+    to be folded with the electron distribution
+    """
+    x = calc_x(B_cgs, epsilon, gamma, mass)
+    prefactor = np.sqrt(3) * np.power(e, 3) * B_cgs / h
+    return prefactor * F(x)
+
+def single_particle_pol_synch_power(B_cgs, epsilon, gamma, mass=m_e):
+    """polarized synchrotron power for a single particle of mass m_e,
+    to be folded with the electron distribution
+    """
+    x = calc_x(B_cgs, epsilon, gamma, mass)
+    prefactor = np.sqrt(3) * np.power(e, 3) * B_cgs / h
+    return prefactor * G(x)
 
 def tau_to_attenuation(tau):
     """Converts the synchrotron self-absorption optical depth to an attenuation
@@ -275,3 +300,80 @@ class Synchrotron(RadiativeProcess):
         """
         idx_max = self.sed_flux(nu).argmax()
         return nu[idx_max]
+
+    @staticmethod
+    def evaluate_polarization_degree(
+        nu,
+        z,
+        d_L,
+        delta_D,
+        B,
+        R_b,
+        n_e,
+        *args,
+        integrator=np.trapz,
+        gamma=gamma_e_to_integrate,
+    ):
+        r"""
+
+        Parameters
+        ----------
+        nu : :class:`~astropy.units.Quantity`
+            array of frequencies, in Hz, to compute the sed
+            **note** these are observed frequencies (observer frame)
+        z : float
+            redshift of the source
+        d_L : :class:`~astropy.units.Quantity`
+            luminosity distance of the source
+        delta_D : float
+            Doppler factor of the relativistic outflow
+        B : :class:`~astropy.units.Quantity`
+            magnetic field in the blob
+        R_b : :class:`~astropy.units.Quantity`
+            size of the emitting region (spherical blob assumed)
+        n_e : :class:`~agnpy.spectra.ElectronDistribution`
+            electron energy distribution
+        \*args
+            parameters of the electron energy distribution (k_e, p, ...)
+        integrator : func
+            which function to use for integration, default `numpy.trapz`
+        gamma : :class:`~numpy.ndarray`
+            array of Lorentz factor over which to integrate the electron
+            distribution
+
+        Returns
+        -------
+        :class:`~astropy.units.Quantity`
+            array of the polarization degree values corresponding to each frequency
+        """
+        # conversions
+        epsilon = nu_to_epsilon_prime(nu, z, delta_D, m = m_e)
+        B_cgs = B_to_cgs(B)
+        # reshape for multidimensional integration
+        _gamma, _epsilon = axes_reshaper(gamma, epsilon)
+        V_b = 4 / 3 * np.pi * np.power(R_b, 3)
+        N_e = V_b * n_e.evaluate(_gamma, *args)
+        # fold the electron distribution with the polarized and unpolarized synchrotron power
+        unpol_flux_integrand = N_e * single_particle_unpol_synch_power(B_cgs, _epsilon, _gamma)
+        unpol_emissivity = integrator(unpol_flux_integrand, gamma, axis=0).reshape(epsilon.shape)
+        pol_flux_integrand = N_e * single_particle_pol_synch_power(B_cgs, _epsilon, _gamma)
+        pol_emissivity = integrator(pol_flux_integrand, gamma, axis=0).reshape(epsilon.shape)
+        # compute the polarization degree
+        pol_degree = (pol_emissivity / unpol_emissivity).to("")
+        return pol_degree
+
+    def polarization_degree(self, nu):
+        r"""Evaluates the polarization degree for a Synchrotron object built
+        from a Blob."""
+        return self.evaluate_polarization_degree(
+            nu,
+            self.blob.z,
+            self.blob.d_L,
+            self.blob.delta_D,
+            self.blob.B,
+            self.blob.R_b,
+            self.blob.n_e,
+            *self.blob.n_e.parameters,
+            integrator=self.integrator,
+            gamma=self.blob.gamma_e,
+        )
