@@ -2,7 +2,7 @@
 import numpy as np
 import astropy.units as u
 from astropy.constants import e, h, c, m_e, sigma_T, mu0
-from ..utils.math import axes_reshaper, gamma_e_to_integrate
+from ..utils.math import axes_reshaper, gamma_e_to_integrate, simpson_loglog
 from ..utils.conversion import nu_to_epsilon_prime, B_to_cgs, lambda_c_e
 from ..radiative_process import RadiativeProcess
 from scipy.special import kv
@@ -23,15 +23,21 @@ def R(x):
     term_2_denom = 1 + 1.353 * np.power(x, 2 / 3) + 0.217 * np.power(x, 4 / 3)
     return term_1_num / term_1_denom * term_2_num / term_2_denom * np.exp(-x)
 
-def F(x, logstep = 2, nsteps = 200):
-    logx = np.log10(x)
-    y = np.logspace(logx, logx + logstep, nsteps)
-    y = x * np.trapezoid( kv(5./3., y), y, axis = 0)
-    mask = x > 50
-    y[mask] = np.sqrt(np.pi * x[mask] / 2) * np.exp(-x[mask])
+
+def F(x, nsteps = 400):
+    """Definition of function F in Eq. 7.30 in [DermerMenon2009]_. 
+    F is function of x, and x is also the lower limit of the integration interval.
+    For each x value, the grid for the corresponding integration starts 
+    from x and extends up to x + 10, with linear steps.
+    The integral is computed using the Simpson's method in log-log space.
+    This method was chosen since more accurate than the trapezoidal one,
+    and faster than using scipy.integrate.quad."""
+    y = np.linspace(x, x + 10, nsteps)
+    y = x * simpson_loglog(kv(5./3., y), y, axis = 0)
     return y
 
 def G(x):
+    """Eq. 6.31c in [RybickiLightman1979]_"""
     return x * kv(2./3., x)
 
 def nu_synch_peak(B, gamma, mass=m_e):
@@ -311,10 +317,12 @@ class Synchrotron(RadiativeProcess):
         R_b,
         n_e,
         *args,
+        ssa=False,
         integrator=np.trapz,
         gamma=gamma_e_to_integrate,
     ):
-        r"""
+        r"""Evaluates the polarization degree of the synchrotron radiation,
+        for a general set of model parameters.
 
         Parameters
         ----------
@@ -360,6 +368,7 @@ class Synchrotron(RadiativeProcess):
         pol_emissivity = integrator(pol_flux_integrand, gamma, axis=0).reshape(epsilon.shape)
         # compute the polarization degree
         pol_degree = (pol_emissivity / unpol_emissivity).to("")
+        pol_degree = np.where(np.isnan(pol_degree), 1, pol_degree)
         return pol_degree
 
     def polarization_degree(self, nu):
@@ -374,6 +383,7 @@ class Synchrotron(RadiativeProcess):
             self.blob.R_b,
             self.blob.n_e,
             *self.blob.n_e.parameters,
+            ssa=False,
             integrator=self.integrator,
             gamma=self.blob.gamma_e,
         )

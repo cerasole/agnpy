@@ -1,6 +1,7 @@
 # math utilities for agnpy
 import numpy as np
 import astropy.units as u
+from scipy.integrate import simpson
 
 # default arrays to be used for integration
 gamma_e_to_integrate = np.logspace(1, 9, 200)
@@ -127,3 +128,7 @@ def power_law_integral(k_e, p, gamma_min, gamma_max):
     else:
         integral = (np.power(gamma_max, 1 - p) - np.power(gamma_min, 1 - p)) / (1 - p)
     return k_e * integral
+
+def simpson_loglog (y, x, **kwargs):
+    integral = simpson(y * x, x = np.log(x), **kwargs)
+    return integral
