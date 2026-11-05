@@ -24,21 +24,23 @@ def R(x):
     return term_1_num / term_1_denom * term_2_num / term_2_denom * np.exp(-x)
 
 
-def F(x, nsteps = 400):
-    """Definition of function F in Eq. 7.30 in [DermerMenon2009]_. 
+def F(x, nsteps=400):
+    """Definition of function F in Eq. 7.30 in [DermerMenon2009]_.
     F is function of x, and x is also the lower limit of the integration interval.
-    For each x value, the grid for the corresponding integration starts 
+    For each x value, the grid for the corresponding integration starts
     from x and extends up to x + 10, with linear steps.
     The integral is computed using the Simpson's method in log-log space.
     This method was chosen since more accurate than the trapezoidal one,
     and faster than using scipy.integrate.quad."""
     y = np.linspace(x, x + 10, nsteps)
-    y = x * simpson_loglog(kv(5./3., y), y, axis = 0)
+    y = x * simpson_loglog(kv(5.0 / 3.0, y), y, axis=0)
     return y
+
 
 def G(x):
     """Eq. 6.31c in [RybickiLightman1979]_"""
-    return x * kv(2./3., x)
+    return x * kv(2.0 / 3.0, x)
+
 
 def nu_synch_peak(B, gamma, mass=m_e):
     """observed peak frequency for monoenergetic electrons
@@ -76,6 +78,7 @@ def single_particle_synch_power(B_cgs, epsilon, gamma, mass=m_e):
     prefactor = np.sqrt(3) * np.power(e, 3) * B_cgs / h
     return prefactor * R(x)
 
+
 def single_particle_unpol_synch_power(B_cgs, epsilon, gamma, mass=m_e):
     """unpolarized synchrotron power for a single particle of mass m_e,
     to be folded with the electron distribution
@@ -84,6 +87,7 @@ def single_particle_unpol_synch_power(B_cgs, epsilon, gamma, mass=m_e):
     prefactor = np.sqrt(3) * np.power(e, 3) * B_cgs / h
     return prefactor * F(x)
 
+
 def single_particle_pol_synch_power(B_cgs, epsilon, gamma, mass=m_e):
     """polarized synchrotron power for a single particle of mass m_e,
     to be folded with the electron distribution
@@ -91,6 +95,7 @@ def single_particle_pol_synch_power(B_cgs, epsilon, gamma, mass=m_e):
     x = calc_x(B_cgs, epsilon, gamma, mass)
     prefactor = np.sqrt(3) * np.power(e, 3) * B_cgs / h
     return prefactor * G(x)
+
 
 def tau_to_attenuation(tau):
     """Converts the synchrotron self-absorption optical depth to an attenuation
@@ -114,7 +119,7 @@ class Synchrotron(RadiativeProcess):
         :func:`~agnpy.synchrotron.Synchrotron.sed_flux`.
     integrator : func
         function to be used for integration (default = `np.trapz`)
-	"""
+    """
 
     def __init__(self, blob, ssa=False, integrator=np.trapz):
         self.blob = blob
@@ -123,7 +128,7 @@ class Synchrotron(RadiativeProcess):
 
     def electron_energy_loss_rate(self, gamma):
         fixed = self._electron_energy_loss_formula_prefactor()
-        return fixed * gamma ** 2
+        return fixed * gamma**2
 
     def _electron_energy_loss_formula_prefactor(self):
         U_B = np.power(self.blob.B_cgs, 2) / (8 * np.pi)
@@ -146,7 +151,7 @@ class Synchrotron(RadiativeProcess):
         of model parameters, see :func:`~agnpy:synchrotron.Synchrotron.evaluate_sed_flux`
         for parameters definition. Eq. before 7.122 in [DermerMenon2009]_."""
         # conversions
-        epsilon = nu_to_epsilon_prime(nu, z, delta_D, m = m_e)
+        epsilon = nu_to_epsilon_prime(nu, z, delta_D, m=m_e)
         B_cgs = B_to_cgs(B)
         # multidimensional integration
         _gamma, _epsilon = axes_reshaper(gamma, epsilon)
@@ -211,7 +216,7 @@ class Synchrotron(RadiativeProcess):
             array of the SED values corresponding to each frequency
         """
         # conversions
-        epsilon = nu_to_epsilon_prime(nu, z, delta_D, m = m_e)
+        epsilon = nu_to_epsilon_prime(nu, z, delta_D, m=m_e)
         B_cgs = B_to_cgs(B)
         # reshape for multidimensional integration
         _gamma, _epsilon = axes_reshaper(gamma, epsilon)
@@ -245,7 +250,7 @@ class Synchrotron(RadiativeProcess):
     def evaluate_sed_flux_delta_approx(nu, z, d_L, delta_D, B, R_b, n_e, *args):
         """Synchrotron flux SED using the delta approximation for the
         synchrotron radiation Eq. 7.70 [DermerMenon2009]_."""
-        epsilon_prime = nu_to_epsilon_prime(nu, z, delta_D, m = m_e)
+        epsilon_prime = nu_to_epsilon_prime(nu, z, delta_D, m=m_e)
         gamma_s = np.sqrt(epsilon_prime / epsilon_B(B))
         B_cgs = B_to_cgs(B)
         U_B = np.power(B_cgs, 2) / (8 * np.pi)
@@ -296,8 +301,7 @@ class Synchrotron(RadiativeProcess):
         return (sphere * self.sed_flux(nu)).to("erg s-1")
 
     def sed_peak_flux(self, nu):
-        """provided a grid of frequencies nu, returns the peak flux of the SED
-        """
+        """provided a grid of frequencies nu, returns the peak flux of the SED"""
         return self.sed_flux(nu).max()
 
     def sed_peak_nu(self, nu):
@@ -355,17 +359,25 @@ class Synchrotron(RadiativeProcess):
             array of the polarization degree values corresponding to each frequency
         """
         # conversions
-        epsilon = nu_to_epsilon_prime(nu, z, delta_D, m = m_e)
+        epsilon = nu_to_epsilon_prime(nu, z, delta_D, m=m_e)
         B_cgs = B_to_cgs(B)
         # reshape for multidimensional integration
         _gamma, _epsilon = axes_reshaper(gamma, epsilon)
         V_b = 4 / 3 * np.pi * np.power(R_b, 3)
         N_e = V_b * n_e.evaluate(_gamma, *args)
         # fold the electron distribution with the polarized and unpolarized synchrotron power
-        unpol_flux_integrand = N_e * single_particle_unpol_synch_power(B_cgs, _epsilon, _gamma)
-        unpol_emissivity = integrator(unpol_flux_integrand, gamma, axis=0).reshape(epsilon.shape)
-        pol_flux_integrand = N_e * single_particle_pol_synch_power(B_cgs, _epsilon, _gamma)
-        pol_emissivity = integrator(pol_flux_integrand, gamma, axis=0).reshape(epsilon.shape)
+        unpol_flux_integrand = N_e * single_particle_unpol_synch_power(
+            B_cgs, _epsilon, _gamma
+        )
+        unpol_emissivity = integrator(unpol_flux_integrand, gamma, axis=0).reshape(
+            epsilon.shape
+        )
+        pol_flux_integrand = N_e * single_particle_pol_synch_power(
+            B_cgs, _epsilon, _gamma
+        )
+        pol_emissivity = integrator(pol_flux_integrand, gamma, axis=0).reshape(
+            epsilon.shape
+        )
         # compute the polarization degree
         pol_degree = (pol_emissivity / unpol_emissivity).to("")
         pol_degree = np.where(np.isnan(pol_degree), 1, pol_degree)
