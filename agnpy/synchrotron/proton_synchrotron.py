@@ -3,9 +3,13 @@ import numpy as np
 import astropy.units as u
 from astropy.constants import e, c, m_p
 from ..utils.math import axes_reshaper, gamma_e_to_integrate
-from ..utils.conversion import nu_to_epsilon_prime, B_to_cgs, lambda_c_p
+from ..utils.conversion import nu_to_epsilon_prime, B_to_cgs
 from ..radiative_process import RadiativeProcess
-from .synchrotron import single_particle_synch_power, tau_to_attenuation
+from .synchrotron import (
+    single_particle_synch_power,
+    single_particle_unpol_synch_power,
+    single_particle_pol_synch_power,
+)
 
 __all__ = ["ProtonSynchrotron"]
 
@@ -28,12 +32,12 @@ class ProtonSynchrotron(RadiativeProcess):
         :func:`~agnpy.synchrotron.Synchrotron.sed_flux`.
     integrator : func
         function to be used for integration (default = `np.trapz`)
-	"""
+    """
 
-    #def __init__(self, blob, ssa=False, integrator=np.trapz):
+    # def __init__(self, blob, ssa=False, integrator=np.trapz):
     def __init__(self, blob, integrator=np.trapz):
         self.blob = blob
-        #self.ssa = ssa
+        # self.ssa = ssa
         self.integrator = integrator
 
     # @staticmethod
@@ -63,7 +67,7 @@ class ProtonSynchrotron(RadiativeProcess):
     #         -1 / (8 * np.pi * m_p * np.power(epsilon, 2)) * np.power(lambda_c_p / c, 3)
     #     )
     #     k_epsilon = (prefactor_k_epsilon * integral).to("cm-1")
-    
+
     #     return (2 * k_epsilon * R_b).to_value("")
 
     @staticmethod
@@ -120,7 +124,7 @@ class ProtonSynchrotron(RadiativeProcess):
             array of the SED values corresponding to each frequency
         """
         # conversions
-        epsilon = nu_to_epsilon_prime(nu, z, delta_D, m = m_p)
+        epsilon = nu_to_epsilon_prime(nu, z, delta_D, m=m_p)
         B_cgs = B_to_cgs(B)
         # reshape for multidimensional integration
         _gamma, _epsilon = axes_reshaper(gamma, epsilon)
@@ -175,8 +179,7 @@ class ProtonSynchrotron(RadiativeProcess):
         return (sphere * self.sed_flux(nu)).to("erg s-1")
 
     def sed_peak_flux(self, nu):
-        """provided a grid of frequencies nu, returns the peak flux of the SED
-        """
+        """provided a grid of frequencies nu, returns the peak flux of the SED"""
         return self.sed_flux(nu).max()
 
     def sed_peak_nu(self, nu):
@@ -185,3 +188,91 @@ class ProtonSynchrotron(RadiativeProcess):
         """
         idx_max = self.sed_flux(nu).argmax()
         return nu[idx_max]
+
+    @staticmethod
+    def evaluate_polarization_degree(
+        nu,
+        z,
+        d_L,
+        delta_D,
+        B,
+        R_b,
+        n_p,
+        *args,
+        integrator=np.trapz,
+        gamma=self.blob.gamma_p,
+    ):
+        r"""Evaluates the polarization degree of the synchrotron radiation,
+        for a general set of model parameters.
+
+        Parameters
+        ----------
+        nu : :class:`~astropy.units.Quantity`
+            array of frequencies, in Hz, to compute the sed
+            **note** these are observed frequencies (observer frame)
+        z : float
+            redshift of the source
+        d_L : :class:`~astropy.units.Quantity`
+            luminosity distance of the source
+        delta_D : float
+            Doppler factor of the relativistic outflow
+        B : :class:`~astropy.units.Quantity`
+            magnetic field in the blob
+        R_b : :class:`~astropy.units.Quantity`
+            size of the emitting region (spherical blob assumed)
+        n_p : :class:`~agnpy.spectra.ProtonDistribution`
+            proton energy distribution
+        \*args
+            parameters of the proton energy distribution (k_p, p, ...)
+        integrator : func
+            which function to use for integration, default `numpy.trapz`
+        gamma : :class:`~numpy.ndarray`
+            array of Lorentz factor over which to integrate the proton
+            distribution
+
+        Returns
+        -------
+        :class:`~astropy.units.Quantity`
+            array of the polarization degree values corresponding to each frequency
+        """
+        # conversions
+        epsilon = nu_to_epsilon_prime(nu, z, delta_D, m=m_p)
+        B_cgs = B_to_cgs(B)
+        # reshape for multidimensional integration
+        _gamma, _epsilon = axes_reshaper(gamma, epsilon)
+        V_b = 4 / 3 * np.pi * np.power(R_b, 3)
+        N_p = V_b * n_p.evaluate(_gamma, *args)
+        # fold the proton distribution with the polarized and unpolarized synchrotron power
+        unpol_flux_integrand = N_p * single_particle_unpol_synch_power(
+            B_cgs, _epsilon, _gamma, mass=m_p
+        )
+        unpol_emissivity = integrator(unpol_flux_integrand, gamma, axis=0).reshape(
+            epsilon.shape
+        )
+        pol_flux_integrand = N_p * single_particle_pol_synch_power(
+            B_cgs, _epsilon, _gamma, mass=m_p
+        )
+        pol_emissivity = integrator(pol_flux_integrand, gamma, axis=0).reshape(
+            epsilon.shape
+        )
+        # compute the polarization degree
+        pol_degree = (pol_emissivity / unpol_emissivity).to("")
+        pol_degree = np.where(np.isnan(pol_degree), 1, pol_degree)
+        return pol_degree
+
+    def polarization_degree(self, nu):
+        r"""Evaluates the polarization degree for a Synchrotron object built
+        from a Blob."""
+        return self.evaluate_polarization_degree(
+            nu,
+            self.blob.z,
+            self.blob.d_L,
+            self.blob.delta_D,
+            self.blob.B,
+            self.blob.R_b,
+            self.blob.n_p,
+            *self.blob.n_p.parameters,
+            ssa=False,
+            integrator=self.integrator,
+            gamma=self.blob.gamma_p,
+        )
