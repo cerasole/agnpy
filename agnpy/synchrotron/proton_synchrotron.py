@@ -200,7 +200,7 @@ class ProtonSynchrotron(RadiativeProcess):
         n_p,
         *args,
         integrator=np.trapz,
-        gamma=self.blob.gamma_p,
+        gamma=gamma_e_to_integrate,
     ):
         r"""Evaluates the polarization degree of the synchrotron radiation,
         for a general set of model parameters.
