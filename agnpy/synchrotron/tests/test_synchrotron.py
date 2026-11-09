@@ -3,6 +3,8 @@ import numpy as np
 import astropy.units as u
 from astropy.constants import m_e
 from astropy.coordinates import Distance
+from astropy.table import QTable
+import pkg_resources
 import pytest
 from pathlib import Path
 from agnpy.emission_regions import Blob
@@ -223,3 +225,52 @@ class TestSynchrotron:
         gamma = 100
         nu_synch = nu_synch_peak(1 * u.G, gamma).to_value("Hz")
         assert np.isclose(nu_synch, 27992489872.33304, atol=0)
+
+    @pytest.mark.parametrize("p", [1.5, 2.0, 2.5, 3.0])
+    def test_synch_reference_polarization(self, p):
+        """Test agnpy synchrotron polarization degree against reference ones
+        generated with jetset v1.3.0, via jetset_synch_polarization.py script."""
+        sed_path = pkg_resources.resource_filename(
+            "agnpy",
+            "data/reference_seds/jetset/data/synch_polarization_jetset_1.3.0.ecsv",
+        )
+        jetset_tab = QTable.read(sed_path, format="ascii.ecsv")
+        nu = jetset_tab["nu"]
+
+        Gamma = 15.0
+        theta = 1.35 * u.Unit("deg")
+        Beta = np.sqrt(1 - 1 / Gamma**2)
+        delta_D = 1 / (Gamma * (1 - Beta * np.cos(theta.to_value("rad"))))
+
+        n_e = PowerLaw.from_total_density(
+            1.2 * u.Unit("cm-3"), p=p, gamma_min=50, gamma_max=8e5, mass=m_e
+        )
+        blob = Blob(
+            n_e=n_e,
+            R_b=2.5e16 * u.cm,
+            z=0.2,
+            B=6.5e-2 * u.G,
+            delta_D=delta_D,
+            Gamma=Gamma,
+        )
+        synch = Synchrotron(blob, ssa=False)
+        agnpy_polarization_degree = synch.polarization_degree(nu)
+        jetset_polarization_degree = jetset_tab[f"pol_deg (p={p:.1f})"]
+
+        nu_range = [5e9, 1e20] * u.Hz
+        make_comparison_plot(
+            nu,
+            agnpy_polarization_degree,
+            jetset_polarization_degree,
+            "agnpy",
+            "jetset",
+            f"Synchrotron polarization, $p = {p:.1f}$",
+            f"{figures_dir}/synch_pol_degree_comparison_p_{p:.1f}_jetset.png",
+            plot_type="$\\Pi_{\\nu}$",
+            y_range=[0.5, 1.0],
+            comparison_range=nu_range.to_value("Hz"),
+        )
+
+        assert check_deviation(
+            nu, agnpy_polarization_degree, jetset_polarization_degree, 0.03, nu_range
+        )
