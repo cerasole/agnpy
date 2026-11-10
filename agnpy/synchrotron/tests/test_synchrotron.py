@@ -274,3 +274,17 @@ class TestSynchrotron:
         assert check_deviation(
             nu, agnpy_polarization_degree, jetset_polarization_degree, 0.03, nu_range
         )
+
+    @pytest.mark.parametrize("p", np.linspace(1.5, 4.5, 10))
+    def test_synch_polarization_power_law(self, p):
+        n_e = PowerLaw.from_total_density(
+            1.0 * u.Unit("cm-3"), p=p, gamma_min=10, gamma_max=1e6, mass=m_e
+        )
+        blob = Blob(n_e=n_e)
+        nu = np.logspace(7, 20, 200) * u.Hz
+        synch = Synchrotron(blob, ssa=False)
+        pol_degree = synch.polarization_degree(nu)
+        pl_pol_degree = (p + 1) / (p + 7/3.)
+        # Range of nu chosen so that, at nu[100], pol_degree[100] should be the one expected from a power-law of index p
+        # Check that computed polarization degree at mid frequency range is within 3% from the expected value from a power-law 
+        assert np.isclose( pol_degree[100], pl_pol_degree, rtol=0, atol = 0.03 )        

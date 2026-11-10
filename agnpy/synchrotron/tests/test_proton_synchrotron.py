@@ -6,13 +6,11 @@ from astropy.coordinates import Distance
 import pytest
 from pathlib import Path
 from agnpy.emission_regions import Blob
-from agnpy.spectra import ExpCutoffPowerLaw
-from agnpy.synchrotron import Synchrotron, nu_synch_peak
-from agnpy.synchrotron import ProtonSynchrotron
+from agnpy.spectra import PowerLaw, ExpCutoffPowerLaw
+from agnpy.synchrotron import ProtonSynchrotron, nu_synch_peak
 from agnpy.utils.math import trapz_loglog
 from agnpy.utils.validation_utils import (
     make_comparison_plot,
-    extract_columns_sample_file,
     check_deviation,
     clean_and_make_dir,
 )
@@ -137,3 +135,17 @@ class TestProtonSynchrotron:
         gamma = 100
         nu_synch = nu_synch_peak(1 * u.G, gamma, mass=m_p).to_value("Hz")
         assert np.isclose(nu_synch, 15245186.451944835, atol=0)
+
+    @pytest.mark.parametrize("p", np.linspace(1.5, 4.5, 10))
+    def test_synch_polarization_power_law(self, p):
+        n_p = PowerLaw.from_total_density(
+            1.0 * u.Unit("cm-3"), p=p, gamma_min=10, gamma_max=1e6, mass=m_p
+        )
+        blob = Blob(n_p=n_p)
+        nu = np.logspace(3, 18, 200) * u.Hz
+        synch = ProtonSynchrotron(blob)
+        pol_degree = synch.polarization_degree(nu)
+        pl_pol_degree = (p + 1) / (p + 7/3.)
+        # Range of nu chosen so that, at nu[100], pol_degree[100] should be the one expected from a power-law of index p
+        # Check that computed polarization degree at mid frequency range is within 3% from the expected value from a power-law 
+        assert np.isclose( pol_degree[100], pl_pol_degree, rtol=0, atol = 0.03 )        

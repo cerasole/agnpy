@@ -381,6 +381,7 @@ class Synchrotron(RadiativeProcess):
         # compute the polarization degree
         pol_degree = (pol_emissivity / unpol_emissivity).to("")
         pol_degree = np.where(np.isnan(pol_degree), 1, pol_degree)
+        pol_degree = np.where(pol_degree > 1, 1, pol_degree)
         return pol_degree
 
     def polarization_degree(self, nu):

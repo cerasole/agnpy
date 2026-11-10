@@ -258,6 +258,7 @@ class ProtonSynchrotron(RadiativeProcess):
         # compute the polarization degree
         pol_degree = (pol_emissivity / unpol_emissivity).to("")
         pol_degree = np.where(np.isnan(pol_degree), 1, pol_degree)
+        pol_degree = np.where(pol_degree > 1, 1, pol_degree)
         return pol_degree
 
     def polarization_degree(self, nu):
@@ -272,7 +273,7 @@ class ProtonSynchrotron(RadiativeProcess):
             self.blob.R_b,
             self.blob.n_p,
             *self.blob.n_p.parameters,
-            ssa=False,
+            #ssa=False,
             integrator=self.integrator,
             gamma=self.blob.gamma_p,
         )
