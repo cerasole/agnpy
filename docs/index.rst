@@ -78,6 +78,7 @@ The documentation includes several tutorial jupyter notebooks providing examples
    time_evolution
    fit
    proton_synchrotron
+   synchrotron_polarization
    acknowledging
    bibliography
    agnpy
