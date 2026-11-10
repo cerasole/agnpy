@@ -42,7 +42,7 @@ blob = Blob(R_b, z, delta_D, Gamma, B, n_e=n_e)
 synch = Synchrotron(blob=blob)
 
 # compute the syncrotron SED and polarization degree over an array of frequencies
-nu = np.logspace(15, 24) * u.Hz
+nu = np.logspace(10, 24) * u.Hz
 synch_sed = synch.sed_flux(nu)
 pol_degree = synch.polarization_degree(nu)
 

@@ -284,7 +284,7 @@ class TestSynchrotron:
         nu = np.logspace(7, 20, 200) * u.Hz
         synch = Synchrotron(blob, ssa=False)
         pol_degree = synch.polarization_degree(nu)
-        pl_pol_degree = (p + 1) / (p + 7/3.)
+        pl_pol_degree = (p + 1) / (p + 7 / 3.0)
         # Range of nu chosen so that, at nu[100], pol_degree[100] should be the one expected from a power-law of index p
-        # Check that computed polarization degree at mid frequency range is within 3% from the expected value from a power-law 
-        assert np.isclose( pol_degree[100], pl_pol_degree, rtol=0, atol = 0.03 )        
+        # Check that computed polarization degree at mid frequency range is within 3% from the expected value from a power-law
+        assert np.isclose(pol_degree[100], pl_pol_degree, rtol=0, atol=0.03)
